@@ -1,0 +1,224 @@
+---
+title: "optimization"
+author: "Paolo Colussi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Appendix – Derivation of the Small-System Formulas
+
+### 1. Original GMERT Updates
+
+At iteration \(m\), the paper defines the random-effects, residual, and covariance updates as:
+
+\[
+\begin{aligned}
+\hat b_i^{(m)} &=
+\hat D_{(m-1)} (W_i^{1/2(M)} Z_i)^{\!\top}
+\hat V_i^{-1(m-1)}
+W_i^{1/2(M)}\big(\tilde y_i^{(M)} - \hat f_{(m)}(X_i)\big), \\[4pt]
+\hat V_i^{(m-1)} &=
+W_i^{1/2(M)} Z_i \hat D_{(m-1)} Z_i^{\!\top} W_i^{1/2(M)}
++ \hat\sigma_{(m-1)}^2 I_{n_i}, \\[6pt]
+\hat\sigma^2_{(m)} &=
+\frac{1}{N} \sum_{i=1}^{n}
+\Big\{
+\hat\epsilon_i^{\!\top}\hat\epsilon_i
++ \hat\sigma^2_{(m-1)}\big[n_i - \hat\sigma^2_{(m-1)} \operatorname{tr}(\hat V_i^{-1(m-1)})\big]
+\Big\}, \\[6pt]
+\hat D_{(m)} &=
+\frac{1}{n}
+\sum_{i=1}^n
+\Big\{
+\hat b_i^{(m)} \hat b_i^{(m)\top}
++
+\big[
+\hat D_{(m-1)} -
+\hat D_{(m-1)}(W_i^{1/2}Z_i)^{\!\top}
+\hat V_i^{-1(m-1)} W_i^{1/2}Z_i \hat D_{(m-1)}
+\big]
+\Big\},
+\end{aligned}
+\]
+with
+\[
+\hat\epsilon_i^{(m)} = W_i^{1/2}\big(\tilde y_i - \hat f_i - Z_i \hat b_i^{(m)}\big).
+\]
+
+All inverses are over the \(n_i\times n_i\) matrices \(\hat V_i\), which dominates computational cost.
+
+---
+
+### 2. Woodbury Identity
+
+For matrices \(A\in\mathbb{R}^{n_i\times n_i}\), \(U\in\mathbb{R}^{n_i\times q}\),
+and \(C\in\mathbb{R}^{q\times q}\),
+\[
+(A + UCU^{\!\top})^{-1}
+= A^{-1} - A^{-1}U\,(C^{-1}+U^{\!\top}A^{-1}U)^{-1}U^{\!\top}A^{-1}.
+\]
+
+Set \(A=\sigma^2 I_{n_i}\), \(U=W_i^{1/2}Z_i\), \(C=D\).
+Then
+\[
+\boxed{
+V_i^{-1}
+= \sigma^{-2}I_{n_i}
+- \sigma^{-4}W_i^{1/2}Z_i
+\big(D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i\big)^{-1}
+Z_i^{\!\top}W_i^{1/2}.
+}
+\tag{1}
+\]
+
+Define
+\[
+A_i = D^{-1} + \sigma^{-2} Z_i^{\!\top} W_i Z_i
+\quad\text{(\(q\times q\) matrix).}
+\]
+
+---
+
+### 3. Small-System Expression for \(b_i\)
+
+Substituting (1) into the paper’s definition of \(\hat b_i\)
+and simplifying with \(W_i^{1/2}Z_i=U_i\)
+gives
+
+\[
+\begin{aligned}
+\hat b_i
+&= D (W_i^{1/2}Z_i)^{\!\top}
+\big[\sigma^{-2}I - \sigma^{-4}W_i^{1/2}Z_iA_i^{-1}Z_i^{\!\top}W_i^{1/2}\big]
+W_i^{1/2}(\tilde y_i-\hat f_i) \\[3pt]
+&= \big(D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i\big)^{-1}
+      \big(\sigma^{-2}Z_i^{\!\top}W_i(\tilde y_i-\hat f_i)\big).
+\end{aligned}
+\]
+
+Hence,
+\[
+\boxed{
+\hat b_i =
+A_i^{-1}\,\sigma^{-2}Z_i^{\!\top}W_i(\tilde y_i-\hat f_i),
+\qquad
+A_i = D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i.
+}
+\tag{2}
+\]
+
+---
+
+### 4. Trace of \(V_i^{-1}\)
+
+Using (1) and the cyclic property of the trace,
+\[
+\operatorname{tr}(V_i^{-1})
+= \frac{n_i}{\sigma^2}
+- \frac{1}{\sigma^4}\operatorname{tr}(A_i^{-1} Z_i^{\!\top}W_i Z_i).
+\tag{3}
+\]
+Thus, the expensive \(n_i\times n_i\) trace can be replaced by a \(q\times q\) trace.
+
+---
+
+### 5. Small-System Expression for \(\sigma^2\)
+
+Plug (3) into the paper’s \(\sigma^2\) update:
+\[
+\begin{aligned}
+\hat\sigma^2
+&=\frac{1}{N}\sum_i
+\Big[
+\hat\epsilon_i^{\!\top}\hat\epsilon_i
++ \sigma^2\big(n_i-\sigma^2\,\operatorname{tr}(V_i^{-1})\big)
+\Big] \\[4pt]
+&=\frac{1}{N}\sum_i
+\Big[
+\hat\epsilon_i^{\!\top}\hat\epsilon_i
++ \sigma^2\big(
+n_i-\sigma^2\big(\tfrac{n_i}{\sigma^2}-\tfrac{1}{\sigma^4}\operatorname{tr}(A_i^{-1}Z_i^{\!\top}W_i Z_i)\big)
+\big)
+\Big] \\[4pt]
+&=\frac{1}{N}\sum_i
+\Big[
+\hat\epsilon_i^{\!\top}\hat\epsilon_i
++ \operatorname{tr}(A_i^{-1}Z_i^{\!\top}W_i Z_i)
+\Big].
+\end{aligned}
+\]
+
+Hence the compact small-system form:
+\[
+\boxed{
+\hat\sigma^2
+= \frac{1}{N}
+\sum_i
+\Big[
+\hat\epsilon_i^{\!\top}\hat\epsilon_i
++ \operatorname{tr}(A_i^{-1}Z_i^{\!\top}W_i Z_i)
+\Big].
+}
+\tag{4}
+\]
+
+---
+
+### 6. Small-System Expression for \(D\)
+
+From the paper,
+\[
+\hat D = \frac{1}{n}\sum_i\big[b_i b_i^{\!\top} + (D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D)\big].
+\]
+Use (1) and \(U_i=W_i^{1/2}Z_i\):
+\[
+D - D U_i^{\!\top}V_i^{-1}U_i D
+= D - D(\sigma^{-2}B_i - \sigma^{-4}B_iA_i^{-1}B_i)D,
+\quad B_i=Z_i^{\!\top}W_i Z_i.
+\]
+Applying the identity
+\[
+D - D(\sigma^{-2}B_i)D
+= (D^{-1}+\sigma^{-2}B_i)^{-1}=A_i^{-1},
+\]
+we obtain
+\[
+\boxed{
+D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D
+= A_i^{-1}.
+}
+\tag{5}
+\]
+Substituting (5) into the update gives the final efficient form:
+\[
+\boxed{
+\hat D
+= \frac{1}{n}\sum_i \big[\hat b_i\hat b_i^{\!\top} + A_i^{-1}\big].
+}
+\tag{6}
+\]
+
+---
+
+### 7. Summary – Paper vs. Small-System Forms
+
+| Quantity | Paper formula | Equivalent small-system form | Inversion dimension |
+|-----------|----------------|------------------------------|---------------------|
+| \(b_i\) | \(D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}(y_i^{\sim}-f_i)\) | \(A_i^{-1}\sigma^{-2}Z_i^{\!\top}W_i(y_i^{\sim}-f_i)\) | \(q\times q\) |
+| \(\sigma^2\) | \(\tfrac{1}{N}\sum_i[\epsilon_i^{\!\top}\epsilon_i+\sigma^2(n_i-\sigma^2\operatorname{tr}(V_i^{-1}))]\) | \(\tfrac{1}{N}\sum_i[\epsilon_i^{\!\top}\epsilon_i+\operatorname{tr}(A_i^{-1}Z_i^{\!\top}W_i Z_i)]\) | \(q\times q\) |
+| \(D\) | \(D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D\) | \(A_i^{-1}\) | \(q\times q\) |
+
+---
+
+### 8. Computational Implication
+
+All large \(n_i\times n_i\) matrix inversions are replaced by \(q\times q\) systems through the matrices
+
+\[
+A_i = D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i.
+\]
+
+Since typically \(q\in\{1,2,3\}\) and \(n_i\) can be 30–200, this reduces per-cluster cost from \(O(n_i^3)\) to \(O(q^3)\) while remaining *exactly algebraically equivalent* to the paper’s updates.

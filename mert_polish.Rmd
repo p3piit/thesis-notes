@@ -1,0 +1,890 @@
+---
+title: "MERT implementation"
+author: "Paolo Colussi"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+rm(list = ls())
+library(rpart)   # CART trees used for the fixed (nonlinear) component f(X)
+library(MASS)    # mvrnorm() to simulate correlated random effects for clusters
+```
+
+## MERT
+
+The MERT model is defined as:
+
+\[
+y_i = f(X_i) + Z_i b_i + \epsilon_i, \\
+b_i \sim N(0,D), \epsilon_i \sim N(0,R_i), \\
+i = 1, . . . , n,
+\]
+
+where $y_i = [y_{i1} , . . . , y_{in_i} ]^T$ is the $n_i × 1$ vector of responses for the $n_i$ observations in cluster $i$, $X_i = [x_{i1} , . . . , x_{in_i} ]^T$ is the $n_i × p$ matrix of fixed-effects covariates, $Z_i = [z_{i1}, . . . , z_{in_i} ]^T$ is the $n_i × q$ matrix of random-effects covariates, $\epsilon_i = [\epsilon_{i1} , . . . , \epsilon_{in_i}]^T$ is the $n_i × 1$ vector of errors, $b_i = (b_{i1} , . . . , b_{iq} )^T$ is the $q × 1$ unknown vector of random effects for cluster $i$. $f(X_i)$ is the fixed effect part for the multilevel model, in the LME model is equal to $X_i\beta$, where $\beta$ is p × 1 unknown vector of parameters for the fixed effects. In our case we will focus on regression trees, but you can actually use any kind of ML or non ML techniques.  
+The total number of observations is $N = \sum^n_{i=1}n_i$ . The covariance matrix of $b_i$ is $D$ while $R_i$ is the covariance matrix of $\epsilon_i$. We also assume also assumes that $b_i$ and $\epsilon_i$ are independent and normally distributed and that the between-clusters observations are independent (this is an usual assumption in LME models). Hence, the covariance matrix of the vector of observations $y_i$ in cluster $i$ is $V_i = Cov(y_i) = Z_i D Z_i^T + R_i$ , and $V = Cov(y) = diag(V_1 , . . . , V_n)$, where $y = [y^T_1 , . . . , y^T_n ]^T$ . We will further assume that the correlation is induced solely via the between-clusters variation, that is, $R_i$ is diagonal ($R_i = \sigma^2I_{n_i} , i = 1, . . . , n$). 
+
+### Algorithm
+
+The MERT algorithm is the ML-based EM-algorithm in which we replace the linear structure used to estimate the fixed part of the model by a standard tree structure. The algorithm is as follows:
+
+**Step 0**
+
+Set $r = 0$. Let $\hat b_{i(0)} = 0$, $\hat\sigma^2_{(0)} = 1$, and $\hat D_{(0)} = I_q$.
+
+**Step 1**
+
+Set $r = r + 1$. 
+
+Update $y^*_{i(r)}$, $\hat f(X_i)_{(r)}$ , and $\hat b_{i(r)}$
+
+$(i)$
+\[
+y^*_{i(r)} = y_i - Z_i\hat b_{i(r-1)}, i = 1, . . . , n \\
+\]
+
+$(ii)$
+
+Let  $\hat f(X_i)_{(r)}$ an estimate of $f(X_i)$ obtained from a standard tree algorithm with $y^*_{i(r)}$ as responses and $X_i, i = 1, . . . , n$, as covariates. Note that the tree is built as usual using all N individual observations as inputs along with their covariate vectors
+
+$(iii)$
+\[
+\hat b_{i(r)} = \hat D_{(r-1)} Z_i^T \hat V_{i(r-1)}^{-1} (y_i - \hat f(X_i)_{(r)}), i = 1,. . .,n
+\]
+
+In R:
+```{r b_fun}
+# b_fun: updates random effects b_i given current D, V_i, and residuals (y - fhat)
+b_fun <- function(G,    # G   : number of clusters
+                  Z,    # Z   : N x q random-effects design (RIC => q = 2)
+                  Vi,   # Vi  : list of length G with V_i matrices (n_i x n_i)
+                  D,    # D   : q x q covariance of random effects
+                  idx,  # idx : list of length G with row indices for each cluster
+                  y,    # y   : response vector length N
+                  fhat # target matrix
+                  ){
+  b <- matrix(0,G,ncol(Z))
+  for (g in seq_len(G)) {
+    Zi <- Z[idx[[g]], , drop = FALSE]                      # cluster-specific Z_i
+    rhs <- y[idx[[g]]] - fhat[idx[[g]]]                    # residual y - fhat on cluster i
+    b[g, ] <- (D %*% t(Zi) %*% solve(Vi[[g]]) %*% rhs)       # b_i = D Z_i^T V_i^{-1} (y - fhat)
+  }
+  b
+}
+```
+
+where $\hat V_{i(r-1)} = Z_i \hat D_{(r-1)} Z_i^T + \hat \sigma^2_{(r-1)}I_{n_i}, i=1,...,n$
+
+In R:
+```{r Vi_fun}
+# Vi_fun: builds list of V_i = Z_i D Z_i^T + sigma^2 I_{n_i}
+Vi_fun <- function(Z,   # Z   : N x q random-effects design
+                   D,   # D   : q x q covariance of random effects
+                   s2,  # s2  : scalar sigma^2 (residual variance; homoskedastic)
+                   G,   # G   : number of clusters
+                   idx  # idx : list of row indices per cluster
+                   ){
+  Vi <- list()
+  for (g in seq_len(G)) {
+    Zi <- Z[idx[[g]], , drop = FALSE]                      # Z_i
+    Vi[[g]] <- Zi %*% D %*% t(Zi) + as.numeric(s2) * diag(nrow(Zi))  # V_i
+  }
+  # Output:
+  # list of length G with n_i x n_i covariance matrices V_i
+  return(Vi)
+}
+```
+
+**Step 2**
+
+Update $\hat \sigma^2_{(r)}$ and $\hat D_{(r)}$ using
+
+$(i)$
+\[
+\hat \sigma^2_{(r)} = N^{-1} \sum^n_{i=1} {\hat\epsilon^T_{i(r)} \hat \epsilon_{i(r)} + \hat\sigma^2_{(r-1)}[n_i - \hat\sigma^2_{(r-1)}trace(\hat V_{i(r-1)})]}
+\]
+
+where $\hat \epsilon_{i(r)} = y_i - \hat f(X_i)_{(r)} - Z_i \hat b_{i(r)}$
+
+In R:
+```{r sigma_fun}
+# sigma_fun: updates sigma^2 using paper's closed-form expression
+sigma_fun <- function(N,   # N   : total number of observations
+                      G,   # G   : number of clusters
+                      idx, # idx : list of row indices per cluster
+                      b,   # b   : matrix q × n vector of random effects 
+                      y,   # y   : response vector length N
+                      Z,   # Z   : N x q random-effects design
+                      D,   # D   : q x q covariance of random effects
+                      Vi,  # Vi  : list of length G with V_i matrices (n_i x n_i)
+                      s2,  # s2  : scalar sigma^2 (residual variance; homoskedastic)
+                      fhat # fhat: current fixed-effect fit
+                      ){
+  term_sum <- 0
+  for (g in seq_len(G)) {
+    Zi <- Z[idx[[g]], , drop = FALSE]                          
+    e <- y[idx[[g]]] - fhat[idx[[g]]] - Zi%*% b[g, ]       # residuals epsilon_i = y - fhat - Z_i b_i
+    term_sum <- term_sum + crossprod(e) + s2 * (length(idx[[g]]) -
+                       s2 * sum(diag(solve(Vi[[g]]))))     # add cluster-i contribution
+  }
+  # Output:
+  #   scalar sigma^2 new estimate
+  term_sum / N                                             # divide by total N
+}
+
+```
+
+$(i)$
+\[
+\hat D_{(r)} = n^{-1} \sum^n_{i=1} {\hat b_{i(r)} \hat b^T_{i(r)} + [\hat\ D_{(r-1)} - \hat\ D_{(r-1)} Z_i^T \hat V^{-1}_{i(r-1)} Z_i \hat\ D_{(r-1)}]}
+\]
+
+In R:
+```{r D_fun}
+# D_fun: updates D using the paper's expression (average of b_i b_i^T plus shrinkage term)
+D_fun <- function(G,   # G   : number of clusters
+                  idx, # idx : list of row indices per cluster
+                  b,   # b   : matrix q × n vector of random effects 
+                  Z,   # Z   : N x q random-effects design
+                  D,   # D   : q x q covariance of random effects
+                  Vi  # Vi  : list of length G with V_i matrices (n_i x n_i)
+                  ){
+  q <- ncol(Z)
+  S <- matrix(0, q, q)                                     # accumulator
+  for (g in seq_len(G)) {
+    Zi <- Z[idx[[g]], , drop = FALSE]                      # Z_i
+    S <- S + tcrossprod(b[g, ]) +                          # b_i b_i^T
+      (D - D %*% t(Zi) %*% solve(Vi[[g]]) %*% Zi %*% D)    # shrinkage term per cluster
+  }
+  # Output:
+  #   q x q updated D
+  S/G                                                      # average over clusters
+}
+```
+
+**Step 3**
+
+Repeat steps 1 and 2 until convergence
+
+The convergence is monitored by computing, at each iteration, the following generalized log-likelihood (GLL) criterion:
+
+\[
+GLL(f, b_i | y) = \sum^n_{i=1} {[y_i - f(X_i) - Z_i b_i]^T R_i^{-1} [y_i - f(X_i) - Z_i b_i] + b_i^T D^{-1} b_i + log|D| + log|R_i|}
+\]
+
+In R:
+
+```{r gll_fun}
+
+# gll_fun: computes generalized log-likelihood (up to additive constant)
+gll_fun <- function(idx, # idx : list of row indices per cluster
+                    b,   # b   : matrix q × n vector of random effects 
+                    y,   # y   : response vector length N
+                    Z,   # Z   : N x q random-effects design
+                    D,   # D   : q x q covariance of random effects
+                    s2,  # s2  : scalar sigma^2 (residual variance; homoskedastic)
+                    fhat # fhat: current fixed-effect fit
+                    ){
+  logdetD <- as.numeric(determinant(D, logarithm = TRUE)$modulus)     # log|D|
+  term_b <- sum(rowSums((b %*% solve(D)) * b))                         # sum_i b_i^T D^{-1} b_i
+  term_r <- 0
+  term_logRi <- 0
+  for (i in seq_along(idx)) {
+    ri <- y[idx[[i]]] - fhat[idx[[i]]]                                 # start residual y - fhat
+           - as.numeric(Z[idx[[i]], , drop = FALSE] %*% b[i, ])        # minus Z_i b_i
+    term_r <- term_r + sum(ri^2) / s2                                  # (1/s2) * ||ri||^2   (note: ˆ is ^)
+    term_logRi <- term_logRi + length(idx[[i]]) * log(s2)              # n_i * log(s2)
+  }
+  
+  # Output:
+  #   scalar GLL value (up to constant)
+  # GLL = sum_i [ (y - f - Zb)^T R_i^{-1} (y - f - Zb) + log|R_i| ] +
+  # + sum_i b_i^T D^{-1} b_i + G*log|D|
+  term_r + term_logRi + term_b + length(idx) * logdetD                 # assemble GLL
+}
+```
+
+To check convergence we use the Aitken stop, *this is not in the paper*, and I'm really unsure if it good enough, but looks like it 
+
+In R:
+
+```{r ait_stop}
+# ait_stop: Aitken acceleration based stopping rule
+ait_stop <- function(gll,  #gll : numeric vector with GLL history (needs last three values)
+                     tol,  #tol : tolerance for relative error to asymptote
+                     it    #it  : current iteration index 
+                     ){
+  converged <- FALSE
+  l1 <- gll[it + 2] - gll[it + 1]                                      # L_t
+  l2 <- gll[it + 1] - gll[it]                                          # L_{t-1}
+  a <- l1 / l2                                                         # Aitken ratio
+  if (is.finite(a) && a > 0 && a < 1) {                                # only meaningful if 0<a<1
+    L_inf <- gll[it + 1] + l1 / (1 - a)                                # extrapolate asymptote
+    err <- abs(L_inf - gll[it + 2]) / (abs(L_inf) + 1e-12)             # relative error to asymptote
+    if (err < tol) converged <- TRUE                                   # declare convergence
+  }
+  converged                                                            # return flag
+}
+```
+
+### Implementation
+
+Here we put the algorithm in a single function with many parameter to be able to control the convergence and to be able to tune the tree from step 1. Also we have a convergence plot for the GLL, if we want to check visually the convergence. 
+
+```{r fit_fun}
+fit_mert_RIC <- function(df,               # df: data.frame with columns
+                                           #  - id: cluster identifier (factor or integer)
+                                           #  - y: numeric response
+                                           #  - x1,x2,x3: numeric covariates
+                                           #  - f/leaf: true generating leaf
+                         max_iter = 1000,  # max_iter: maximum number of EM iterations
+                         tol = 1e-6,       # tol: convergence tolerance (for Aitken acceleration on GLL)
+                         cp = 0.0,         # cp: rpart complexity parameter (pruning threshold)
+                         minsplit = 20,    # minsplit: minimum number of obs that must exist in a node to split
+                         xval = 10,        # xval: number of cross-validation folds used inside rpart
+                         plot_convergence = FALSE # plot_convergence: if TRUE, plots trajectory of GLL vs iteration
+                         ) {
+
+  # --- Basic setup ---
+  N <- nrow(df)                                        # total number of rows
+  G <- length(sort(unique(df$id)))                     # number of clusters
+  idx_by_cluster <- split(seq_len(N), df$id)           # list: indices for each cluster
+
+  y <- df$y                                           # response vector
+  Z <- cbind(1, df$x1)                                # random effects design: intercept + slope on x1
+  q <- ncol(Z)                                        # dimension of random effects (q=2)
+
+  # --- Initialization (Step 0 of EM) ---
+  sigma2 <- 1                                         # initialize residual variance
+  D <- diag(2)                                        # initialize random-effects covariance as identity
+  b <- matrix(0, G, q)                                # initialize all cluster random effects at zero
+  gll <- c(0, 0)                                      # store GLL values (two placeholders for Aitken)
+  it <- 0L                                            # iteration counter
+
+  # --- EM algorithm loop ---
+  repeat {
+    it <- it + 1L
+
+    # (1.i) Partial E-step: compute y* = y - Z b
+    zb <- numeric(N)                                  # vector to hold cluster random effect contributions
+    for (g in seq_len(G)) {
+      idx <- idx_by_cluster[[g]]                      # rows belonging to cluster g
+      zb[idx] <- Z[idx, , drop = FALSE] %*% b[g, ]    # compute Z_i b_i for this cluster
+    }
+    y_star <- y - zb                                  # pseudo-response for fixed effects tree
+
+    # (1.ii) Fit regression tree to y* to update f(X)
+    ctrl <- rpart.control(cp = cp, minsplit = minsplit, xval = xval)  # tree growth control
+    tree <- rpart(y_star ~ x1 + x2 + x3, data = df,
+                  method = "anova", control = ctrl)   # regression tree on pseudo-response
+
+    fhat <- as.numeric(predict(tree, df[, -2]))       # fitted fixed part values for all obs
+
+    # (1.iii) Update random effects b_i
+    Vi <- Vi_fun(Z = Z, D = D, s2 = sigma2, G = G, idx = idx_by_cluster)  # compute cluster covariance matrices
+    b  <- b_fun(G = G, Z = Z, Vi = Vi, D = D,idx = idx_by_cluster, 
+                y = y, fhat = fhat)          # update b_i for each cluster
+
+    # (2.i) Update sigma^2 (residual variance)
+    sigma2 <- sigma_fun(N = N, G = G, idx = idx_by_cluster,
+                        b = b, y = y, Z = Z, D = D,
+                        Vi = Vi, s2 = sigma2, fhat = fhat)
+
+    # (2.ii) Update D (covariance of random effects)
+    D <- D_fun(G = G, idx = idx_by_cluster,
+               Z = Z, D = D, Vi = Vi, b = b)
+
+    # --- Convergence monitoring ---
+    gll[it+2] <- gll_fun(D = D, b = b, idx = idx_by_cluster,
+                         Z = Z, y = y, fhat = fhat, s2 = sigma2)
+    # Append GLL value for this iteration. The index shift (+2) leaves room for Aitken method.
+
+    if (ait_stop(gll = gll, it = it, tol = tol)) {    # check Aitken acceleration criterion
+      n_iter <- it
+      converged <- TRUE
+      break                                           # stop EM loop if converged
+    }
+
+    if (it >= max_iter) {                             # guard against infinite loop
+      n_iter <- it
+      converged <- FALSE
+      message(sprintf("WARNING: did not converge in %d iterations.", max_iter))
+      break
+    }
+  }
+
+  # --- Optional convergence plot ---
+  if (isTRUE(plot_convergence)) {
+    op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+    if (length(gll) >= 3) {                           # enough GLL values to plot
+      g_idx <- 3:length(gll)                          # skip placeholders
+      it_axis <- seq_along(g_idx)                     # iterations on x-axis
+      plot(it_axis, gll[g_idx], type = "l", lwd = 2,
+           xlab = "Iteration", ylab = "GLL (up to const)",
+           main = "EM Convergence (GLL)")
+      if (!is.na(n_iter)) {                           # mark stopping iteration
+        abline(v = n_iter, lty = 2, col = "red")
+        mtext(sprintf("stop @ %d", n_iter),
+              side = 3, line = 0.2, col = "red")
+      }
+    }
+  }
+
+  # --- Return results ---
+  list(
+    tree      = tree,       # fitted rpart tree (fixed-effects function f(X))
+    b         = b,          # estimated random effects for each cluster (matrix G x q)
+    D         = D,          # estimated covariance matrix of random effects
+    sigma2    = sigma2,     # estimated residual variance
+    converged = converged,  # logical flag whether converged
+    n_iter    = n_iter,     # number of iterations actually run
+    train_ids = df$id,      # training cluster identifiers
+    gll       = gll,        # sequence of GLL values (for diagnostics)
+    tol       = tol         # tolerance value used for stopping
+  )
+}
+
+
+```
+
+### Prediction
+
+To predict the response for a new observation that belongs to a cluster among those used to fit the MERT model, we use both its corresponding population-averaged tree prediction and the predicted random part corresponding to its cluster. For a new observation that belongs to a cluster not included in the sample used to estimate the model parameters, we can only take the corresponding population-averaged tree prediction.
+
+```{r}
+predict_mert_RIC <- function(fit, new_df) {
+  # fixed part: regression tree predictions using predictors only
+  fhat <- as.numeric(predict(fit$tree, new_df))        # tree fitted on y*; use on new data
+  # construct random effects design for new data: [1, x1]
+  Znew <- cbind(1, new_df$x1)
+  # container for random effects contributions
+  add <- numeric(nrow(new_df))
+  # clusters seen during training (so we have estimated b_i)
+  clus_fit <- sort(unique(fit$train_ids))
+  # map each new cluster id to its index in clus_fit (NA if unseen)
+  map <- match(new_df$id, clus_fit)
+  seen <- !is.na(map)                                  # TRUE for rows belonging to seen clusters
+  if (any(seen)) {
+    # add random effect contribution: row-wise sum of [1, x1] * b_i
+    add[seen] <- rowSums(Znew[seen, , drop = FALSE] *
+                         fit$b[map[seen], ])
+  }
+  # total prediction = fixed part + random effects contribution
+  fhat + add
+}
+```
+
+
+## Cross-validation implementation
+
+To make our model more robust, we perform cross-validation of the MERT model at the cluster level. Each fold trains on $K-1$ sets of clusters and tests on the held-out set, so the model is evaluated on completely unseen clusters (where random effects can’t be estimated, so *I should probably change that*).
+
+For each fold the code computes:
+
+* PMSE (prediction mean squared error) on the test set.
+* Number of leaves in the fitted tree (a measure of tree complexity).
+* Convergence flag for the EM algorithm.
+* The full fit object, so you can inspect estimated parameters.
+* Leaf assignment accuracy:
+  - On training data: percentage of observations assigned to their true generating leaf when each terminal node is labeled by its majority true leaf.
+  - On test data: same percentage, for held-out clusters.
+* An overall total percentage of “right trees” across all folds, computed by pooling all test rows.
+
+Two versions are provided:
+
+* `cv10_mert_RIC`: sequential, runs folds one after another.
+* `cv10_mert_RIC_parallel`: parallelized with parLapply for faster evaluation on multi-core machines.
+
+We also need a function to assign a plausible terminal node for the new data that we predict with the tree. To do so, we use the leaf mean (yval) for the tree that we trained. Then, we map each predicted value back to the leaf whose yval matches, and return the ID of the leaf of the trained tree.
+
+```{r leaf_where}
+# Helper: recover terminal node IDs for NEW data in an rpart regression tree
+leaf_per <- function(tree, train, newdata, digits = 12) {
+        # Map each learned terminal node (from training) to its majority TRUE leaf
+  node_train <- tree$where                             # node ID per TRAIN row
+  tab <- table(node = node_train, leaf = train$leaf)       # cross-tab nodes vs true leaves
+  major_by_node <- apply(tab, 1, which.max)                # majority true leaf per node (1..4)
+  pred_leaf_train <- unname(major_by_node[as.character(node_train)])
+  fr <- tree$frame                                           # rpart frame (nodes metadata)
+  leaf_rows <- fr$var == "<leaf>"                            # logical: which rows are leaves
+  leaf_ids  <- as.integer(row.names(fr)[leaf_rows])          # numeric node IDs for leaves
+  yvals     <- fr$yval[leaf_rows]                            # leaf means
+  yhat <- as.numeric(predict(tree, newdata))                 # predicted leaf means for newdata
+  node_test <- match(round(yhat, digits), round(yvals, digits))    # map each yhat to a leaf yval
+  tab <- table(node = leaf_ids[node_test], leaf = newdata$leaf)       # cross-tab nodes vs true leaves
+  major_by_node <- apply(tab, 1, which.max)
+  pred_leaf_test <- unname(major_by_node[as.character(leaf_ids[node_test])])
+  leaf_acc <- mean(c(pred_leaf_train,pred_leaf_test) == c(train$leaf,newdata$leaf)) * 100 
+  leaf_acc
+ }
+```
+
+Now we can define our functions, first he sequential one
+
+```{r cross-validation}
+
+# Sequential K-fold CV at the cluster level
+cv10_mert_RIC <- function(df, K = 10, seed = 123,
+                          max_iter = 1000, tol = 1e-6,
+                          cp = 0.0, minsplit = 20, xval = 10) {
+  set.seed(seed)                                             # reproducibility for fold assignment
+  clus <- sort(unique(df$id))                                # unique cluster IDs
+  K <- min(K, length(clus))                                  # if clusters < K, cap K
+  folds <- split(clus, sample(rep(seq_len(K),                # assign clusters to folds uniformly
+                                  length.out = length(clus))))
+
+  pmse   <- numeric(K)                                       # PMSE per fold (test)
+  leaves <- integer(K)                                       # number of terminal nodes per fitted tree
+  conv   <- logical(K)                                       # EM convergence flag per fold
+
+  fits <- vector("list", K)                                  # store full fit objects (inspect later)
+  leaf_acc_train <- numeric(K)                               # % correct leaf assignment on training data
+  leaf_acc_test  <- numeric(K)                               # % correct leaf assignment on test data
+  n_test_vec     <- integer(K)                               # number of test rows per fold
+  correct_test_counts <- integer(K)                          # count of correct leaf assignments on test
+
+  for (k in seq_len(K)) {
+    test_ids <- folds[[k]]                                   # held-out clusters for this fold
+    train <- df[!df$id %in% test_ids, , drop = FALSE]        # training subset (all other clusters)
+    test  <- df[ df$id %in% test_ids, , drop = FALSE]        # test subset (held-out clusters only)
+
+    fit <- fit_mert_RIC(train, max_iter = max_iter, tol = tol,
+                        cp = cp, minsplit = minsplit, xval = xval)   # fit model on training clusters
+    fits[[k]] <- fit                                         # store the whole fit
+
+    yhat <- predict_mert_RIC(fit, test)                      # predict on test rows (new clusters => fixed part only)
+    pmse[k]   <- mean((test$y - yhat)^2)                     # test PMSE
+    leaves[k] <- length(unique(fit$tree$where))              # tree complexity (number of unique terminal nodes)
+    conv[k]   <- isTRUE(fit$converged)                       # did EM converge?
+
+
+
+    # Aggregate counts to compute a global test percentage across folds
+    n_test_vec[k] <- nrow(test)
+    correct_test_counts[k] <- sum(pred_leaf_test[ok] == test$leaf[ok])
+
+    # Optional console log per fold (comment out if too chatty)
+    cat(sprintf("[Fold %d/%d] PMSE=%.4f | leaves=%d | converged=%s | leaf_acc_train=%.2f%% | leaf_acc_test=%.2f%%\n",
+                k, K, pmse[k], leaves[k], conv[k], leaf_acc_train[k], leaf_acc_test[k]))
+  }
+
+  total_right_trees_pct <- 100 * sum(correct_test_counts) / sum(n_test_vec)  # observation-weighted over all test rows
+
+  list(
+    PMSE_mean              = mean(pmse),                  # average test PMSE across folds
+    PMSE_sd                = sd(pmse),                    # std dev of test PMSE
+    PMSE_by_fold           = pmse,                        # vector of test PMSE per fold
+    avg_leaves             = mean(leaves),                # average number of leaves
+    converged_by_fold      = conv,                        # logical vector of EM convergence flags
+    fits                   = fits,                        # list of full fit objects (one per fold)
+    leaf_acc_train_by_fold = leaf_acc_train,              # % correct leaves on training per fold
+    leaf_acc_test_by_fold  = leaf_acc_test,               # % correct leaves on test per fold
+    total_right_trees_pct  = total_right_trees_pct        # pooled percentage of correct test leaves
+  )
+}
+```
+
+And then we define the parallel version
+
+```{r cross-validation_par}
+# Parallel K-fold CV at the cluster level (PSOCK cluster; portable)
+cv10_mert_RIC_parallel <- function(df, K = 10, seed = 123,
+                                   max_iter = 1000, tol = 1e-6,
+                                   cp = 0.0, minsplit = 20, xval = 10,
+                                   n_cores = NULL) {
+  set.seed(seed)                                             # reproducibility
+  clus <- sort(unique(df$id))                                # unique cluster IDs
+  K <- min(K, length(clus))                                  # cap K if needed
+  folds <- split(clus, sample(rep(seq_len(K),                # assign clusters to folds
+                                  length.out = length(clus))))
+
+  if (is.null(n_cores)) {                                    # choose core count: <= K and <= physical cores
+    n_cores <- max(1, min(K, parallel::detectCores(logical = FALSE)))
+  }
+  cl <- parallel::makeCluster(n_cores)                       # start cluster 
+  on.exit(parallel::stopCluster(cl), add = TRUE)             # ensure cleanup
+
+  parallel::clusterSetRNGStream(cl, seed)                    # synchronized RNG streams per worker
+  parallel::clusterEvalQ(cl, { library(rpart); library(MASS) })  # load packages
+  parallel::clusterExport(                                   # export needed objects/functions 
+    cl,
+    varlist = c("df","folds","K","max_iter","tol","cp","minsplit","xval",
+                "fit_mert_RIC","predict_mert_RIC","leaf_where","Vi_fun",
+                "b_fun","D_fun","sigma_fun","gll_fun","ait_stop"),
+    envir = environment()
+  )
+
+  # Run each fold on a worker
+  res_list <- parallel::parLapply(cl, seq_len(K), function(k) {
+    tryCatch({
+    test_ids <- folds[[k]]                                   # held-out clusters
+    train <- df[!df$id %in% test_ids, , drop = FALSE]        # training subset
+    test  <- df[ df$id %in% test_ids, , drop = FALSE]        # test subset
+
+    fit <- fit_mert_RIC(train, max_iter = max_iter, tol = tol,
+                        cp = cp, minsplit = minsplit, xval = xval)   # train on worker
+
+    yhat <- predict_mert_RIC(fit, test)                      # predict on test rows
+
+    pmse <- mean((test$y - yhat)^2)                          # test PMSE
+    leaves <- length(unique(fit$tree$where))                 # tree size
+    converged <- isTRUE(fit$converged)                       # EM convergence
+
+
+    leaf_acc <- leaf_per(fit$tree,train,test)
+
+    list(
+      fit        = fit,                                  # full fitted model for this fold
+      pmse       = pmse,                                 # test PMSE
+      leaves     = leaves,                               # number of leaves
+      converged  = converged,                            # EM convergence flag
+      leaf_acc   = leaf_acc,
+      n_test     = nrow(test),                           # number of test rows
+      correct_test_count = correct_test_count            # count of correct test leaves
+    )
+    })
+  })
+
+  bad <- vapply(res_list, function(x) identical(x$.ok, FALSE), logical(1))
+if (any(bad)) {
+  flds <- vapply(res_list[bad], `[[`, integer(1), "fold")
+  msgs <- vapply(res_list[bad], `[[`, character(1), "message")
+  stop(sprintf("Parallel CV failed in folds %s; first error: %s",
+               paste(flds, collapse = ", "), msgs[1]))
+}
+  
+  # Aggregate results back on the master
+  pmse    <- vapply(res_list, `[[`, numeric(1), "pmse")                # numeric vector length K
+  leaves  <- vapply(res_list, `[[`, integer(1), "leaves")
+  conv    <- vapply(res_list, `[[`, logical(1), "converged")
+  fits    <- lapply(res_list, `[[`, "fit")
+  leaf_acc_train <- vapply(res_list, `[[`, numeric(1), "leaf_acc_train")
+  leaf_acc_test  <- vapply(res_list, `[[`, numeric(1), "leaf_acc_test")
+  n_test_vec     <- vapply(res_list, `[[`, integer(1), "n_test")
+  correct_counts <- vapply(res_list, `[[`, integer(1), "correct_test_count")
+
+  # console log per fold (originally meant only for the sequential function, but useful to see immediatly how many folds converged)
+  for (k in seq_len(K)) {
+    cat(sprintf("[Fold %d/%d] PMSE=%.4f | leaves=%d | converged=%s | leaf_acc_train=%.2f%% | leaf_acc_test=%.2f%%\n",
+                k, K, pmse[k], leaves[k], conv[k], leaf_acc_train[k], leaf_acc_test[k]))
+  }
+
+  total_right_trees_pct <- 100 * sum(correct_counts) / sum(n_test_vec) # pooled percentage over all test rows
+
+  list(
+    PMSE_mean             = mean(pmse),                 # average test PMSE
+    PMSE_sd               = sd(pmse),                   # dispersion of test PMSE
+    PMSE_by_fold          = pmse,                       # per-fold PMSE
+    avg_leaves            = mean(leaves),               # average tree size
+    converged_by_fold     = conv,                       # per-fold EM convergence flags
+    fits                  = fits,                       # per-fold fitted models
+    leaf_acc_by_fold= leaf_acc,
+    total_right_trees_pct = total_right_trees_pct,      # pooled correct-leaf percentage on test
+    n_cores_used          = n_cores                     # number of worker processes used
+  )
+}
+
+```
+
+## Simulation
+
+This function simulate the data in the same way the paper does, using a tree for determine the data generating process of $y$.
+
+```{r}
+# --- Simulate clustered data with 4-leaf fixed tree and RIC random effects ---
+# Purpose: create a synthetic dataset with cluster IDs, covariates, outcome y, and the
+#          TRUE leaf label used by the data-generating partition. This lets us later
+#          evaluate whether the learned tree recovers the correct partition.
+simulate_data_paper <- function(n_clusters = 100, n_per_cluster = 55,
+                              mu = c(-20, -10, 10, 20),
+                              D = matrix(c(0.25, 0.00, 0.00, 0.25), 2, 2),
+                              sigma2 = 1) {
+  N  <- n_clusters * n_per_cluster
+  id <- rep(seq_len(n_clusters), each = n_per_cluster)
+  x1 <- runif(N, 0, 10)
+  x2 <- runif(N, 0, 10)
+  x3 <- runif(N, 0, 10)
+  
+  # True 4-region partition (axis-aligned). We'll check if the learned tree matches this.
+  leaf <- ifelse(x1 <= 5 & x2 <= 5, 1,
+                 ifelse(x1 <= 5 & x2 > 5, 2,
+                        ifelse(x1 >  5 & x3 <= 5, 3, 4)))
+  f_fixed <- mu[leaf]
+  
+  # Cluster random effects b_i ~ N(0, D), applied to [1, x1]
+  B <- MASS::mvrnorm(n = n_clusters, mu = c(0, 0), Sigma = D)  # G x 2
+  Z <- cbind(1, x1)
+  rand <- rowSums(Z * B[id, ])
+  
+  # Outcome with residual noise
+  y <- f_fixed + rand + rnorm(N, 0, sqrt(sigma2))
+  data.frame(id, y, x1, x2, x3, leaf)
+}
+```
+
+## Simulation like in the 
+
+```{r}
+simulation_paper <- function(
+  n_rep = 100,
+  n_clusters = 100,
+  n_per_cluster = 55,
+  mu = c(-20, -10, 10, 20),
+  D = matrix(c(0.25, 0.00, 0.00, 0.25), 2, 2),
+  sigma2 = 1,
+  seed = 123,
+  max_iter = 1000,
+  tol = 1e-6,
+  cp = 0.0,
+  minsplit = 20,
+  xval = 10,
+  n_workers = 10,
+  use_parallel = TRUE
+) {
+  # --- basic checks -----------------------------------------------------------
+  if (n_per_cluster < 5L) {
+    stop("n_per_cluster must be >= 5 to sample 5 train obs per cluster.")
+  }
+
+  # Master seed ensures reproducibility of: replicate seeds + any serial path.
+  set.seed(seed)
+
+  # Create a reproducible seed per replicate (so parallel order doesn't matter).
+  rep_seeds <- sample.int(1000000, n_rep)
+
+  # Worker function: runs ONE replicate safely and returns a named list
+  one_rep <- function(rep_id, rep_seed) {
+    set.seed(rep_seed)
+
+    # 1) Simulate data
+    data_ric <- simulate_data_paper(n_clusters, n_per_cluster, mu, D, sigma2)
+
+    # 2) Stratified split: 5 train obs from each cluster id, rest to test
+    ids <- data_ric$id
+    train_idx <- unlist(
+      tapply(seq_len(nrow(data_ric)), ids, function(idx) sample(idx, 5L))
+    )
+    train <- data_ric[train_idx, , drop = FALSE]
+    test  <- data_ric[-train_idx, , drop = FALSE]
+
+    # 3) Fit model with protection against failures (keep the run going)
+    fit <- fit_mert_RIC(train, max_iter = max_iter, tol = tol,
+                   cp = cp, minsplit = minsplit, xval = xval)
+
+    # 4) Predict + metrics
+    yhat <- predict_mert_RIC(fit, test)
+    pmse <- mean((test$y - yhat)^2)
+
+    # custom leaf metric on train/test, if available
+    lper <- leaf_per(fit$tree, train, test)
+
+    list(
+      rep = rep_id,
+      pmse = pmse,
+      converged = isTRUE(fit$converged),
+      leaves_per = as.numeric(lper),
+      seed = rep_seed
+    )
+  }
+
+  # --- run replicates (parallel or serial) -----------------------------------
+  results_list <- NULL
+
+  if (use_parallel && n_workers > 1L) {
+    cl <- parallel::makeCluster(n_workers)
+    on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+
+    # Export required objects/functions into workers’ environments
+    parallel::clusterEvalQ(cl, { library(rpart); library(MASS) })
+    parallel::clusterExport(
+      cl,
+      varlist = c("simulate_data_paper", "fit_mert_RIC", "predict_mert_RIC",
+                  "leaf_per", "n_clusters", "n_per_cluster", "mu", "D",
+                  "sigma2", "max_iter", "tol", "cp", "minsplit", "xval","Vi_fun",
+                "b_fun","D_fun","sigma_fun","gll_fun","ait_stop"),
+      envir = environment()
+    )
+
+    # Ensure packages (if any) used by your functions are attached on workers
+    # parallel::clusterEvalQ(cl, { library(yourPkgIfNeeded) })
+
+    # Build args and dispatch
+    idx <- seq_len(n_rep)
+    results_list <- parallel::parLapply(
+      cl, idx,
+      function(i) {
+        one_rep(i, rep_seed = rep_seeds[i])
+      }
+    )
+  } else {
+    # Serial fallback
+    results_list <- lapply(seq_len(n_rep), function(i) one_rep(i, rep_seeds[i]))
+  }
+
+  # --- aggregate --------------------------------------------------------------
+  # Bind to data.frame
+  res <- do.call(rbind, lapply(results_list, as.data.frame))
+
+  # Summaries with NA-robust stats
+  pmse_vec <- res$pmse
+  leaves_per_vec <- res$leaves_per
+
+  out <- list(
+    avg_tree = mean(leaves_per_vec, na.rm = TRUE),
+    avg_pmse = mean(pmse_vec, na.rm = TRUE),
+    min_pmse = min(pmse_vec, na.rm = TRUE),
+    max_pmse = max(pmse_vec, na.rm = TRUE),
+    sd_pmse  = stats::sd(pmse_vec, na.rm = TRUE),
+    med_pmse = stats::median(pmse_vec, na.rm = TRUE),
+    conv     = res$converged,              # vector per-replicate (TRUE/FALSE)
+    converged_ratio = mean(res$converged, na.rm = TRUE),
+    per_rep  = res                          # full per-replicate table
+  )
+
+  return(out)
+}
+
+```
+
+
+## Playground
+
+```{r playgroung, eval=FALSE}
+
+# dat <- simulate_data_paper(n_clusters = 100, n_per_cluster = 55,
+#                          mu = c(-20, -10, 10, 20),
+#                          D = matrix(c(0.25, 0, 0, 0.25), 2, 2),
+#                          sigma2 = 1, seed = 42)
+
+# cv_res <- cv10_mert_RIC_parallel(dat, seed = 7, max_iter = 1000, tol = 1e-10,
+#                                  cp = 0.0, minsplit = 50, xval = 10, n_cores = 10)
+
+# cv_res <- cv10_mert_RIC(dat, seed = 7, max_iter = 100, tol = 1e-35,
+#                                  cp = 0.0, minsplit = 50, xval = 10)
+# print(cv_res)
+# cat(sprintf("Total right trees on CV test sets: %.2f%%\n", cv_res$total_right_trees_pct))
+
+#fit <- fit_mert_RIC(dat, max_iter = 1000)
+
+# simulation_paper <- function(n_rep=100, n_clusters = 100, n_per_cluster = 55,
+#                             mu = c(-20, -10, 10, 20),
+#                             D = matrix(c(0.25, 0.00, 0.00, 0.25), 2, 2),
+#                             sigma2 = 1, seed = 123,
+#                             max_iter = 1000, tol = 1e-6,
+#                             cp = 0.0, minsplit = 20, xval = 10){
+### RIC as the paper
+#set.seed(seed)
+#pmse<- c()
+#leaves_per <- c()
+#conv <- c()
+#for (i in 1:n_rep) {
+#data_ric <- simulate_data_paper(n_clusters, n_per_cluster, mu, D, sigma2)
+#train_idx <- unlist(tapply(1:5500, data_ric$id, function(idx) sample(idx, 5)))
+#train <- data_ric[train_idx,]
+#test <- data_ric[-train_idx,]
+#fit <- fit_mert_RIC(train, max_iter,tol,cp,minsplit,xval)
+#yhat <- predict_mert_RIC(fit, test)   
+#pmse[i]   <- mean((test$y - yhat)^2)                     # test PMSE
+#conv[i]   <- isTRUE(fit$converged)                       # did EM converged
+#leaves_per[i] <- leaf_per(fit$tree,train,test)
+
+#}
+#  list(
+#    avg_tree <- mean(leaves_per),
+#    avg_pmse <- mean(pmse),
+#    min_pmse <- min(pmse),
+#    max_pmse <- max(pmse),
+#    sd_pmse  <- sd(pmse),
+#    med_pmse <- median(pmse),
+#    conv <- conv
+#  )
+#}
+#
+
+
+RE_large <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0, 0.00, 0.00, 0), 2, 2))
+RE_small <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0, 0.00, 0.00, 0), 2, 2))
+RI_large_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.25, 0.00, 0.00, 0), 2, 2))
+RI_small_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.25, 0.00, 0.00, 0), 2, 2))
+RI_large_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.5, 0.00, 0.00, 0), 2, 2))
+RI_small_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.5, 0.00, 0.00, 0), 2, 2)) 
+RIC_small_nocorr_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.25, 0.00, 0.00, 0.25), 2, 2))
+RIC_large_nocorr_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.25, 0.00, 0.00, 0.25), 2, 2))
+RIC_small_nocorr_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.50, 0.00, 0.00, 0.50), 2, 2))
+RIC_large_nocorr_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.50, 0.00, 0.00, 0.50), 2, 2))
+RIC_small_corr_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.25, 0.125, 0.125, 0.25), 2, 2))
+RIC_large_corr_25sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.25, 0.125, 0.125, 0.25), 2, 2))
+RIC_small_corr_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(10, 11, 12, 13),D = matrix(c(0.5, 0.25, 0.25, 0.5), 2, 2))
+RIC_large_corr_50sd <- simulation_paper(n_rep = 100, n_workers = 10, max_iter = 10000, 
+  mu = c(-20, -10, 10, 20),D = matrix(c(0.5, 0.25, 0.25, 0.5), 2, 2))
+
+
+# List the object names you created
+obj_names <- c(
+  "RE_large", "RE_small",
+  "RI_large_25sd", "RI_large_50sd",
+  "RI_small_25sd", "RI_small_50sd",
+  "RIC_small_nocorr_25sd", "RIC_small_nocorr_50sd",
+  "RIC_large_nocorr_25sd","RIC_large_nocorr_50sd",
+  "RIC_small_corr_25sd", "RIC_small_corr_50sd", 
+  "RIC_large_corr_25sd",  "RIC_large_corr_50sd"
+)
+
+# Helper to extract metrics from one result object by name
+.extract_row <- function(name) {
+  x <- get(name, envir = .GlobalEnv)
+  data.frame(
+    model               = name,
+    avg_pmse            = x$avg_pmse,
+    min_pmse            = x$min_pmse,
+    max_pmse            = x$max_pmse,
+    sd_pmse             = x$sd_pmse,
+    avg_tree_convergence= x$avg_tree,
+    convergence_ratio   = x$converged_ratio,
+    check.names = FALSE
+  )
+}
+
+# Build the table
+summary_table <- do.call(rbind, lapply(obj_names, .extract_row))
+
+# Optional rounding (set digits as you like)
+digits <- 4
+num_cols <- c("avg_pmse","min_pmse","max_pmse","sd_pmse",
+              "avg_tree_convergence","convergence_ratio")
+summary_table[num_cols] <- lapply(summary_table[num_cols], round, digits)
+
+summary_table
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

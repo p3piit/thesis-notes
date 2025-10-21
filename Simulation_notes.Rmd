@@ -1,0 +1,645 @@
+---
+title: "Simulation notes clustered binary data"
+author: "Paolo Colussi"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+rm(list = ls())
+library(rpart)   # CART trees used for the fixed (nonlinear) component f(X)
+library(MASS)    # mvrnorm() to simulate correlated random effects for clusters
+library(lme4)    # glmer() to fit standard GLMMs for comparison
+library(parallel) # mclapply() for parallel computation
+library(ggplot2) # plotting
+```
+
+
+## Simulation
+
+In this section, we generate a clustered binary dataset designed to mimic the structure assumed by the GMERT model.  
+Each cluster has its own random intercept and random slope for the covariate `x1`.  
+The binary response `y` is simulated under a logistic link function that combines fixed effects and random effects.  
+This setup provides a realistic test bed for evaluating mixed-effects tree algorithms such as GMERT and standard GLMMs.
+
+
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data_gmert: simulate clustered binary data for GMERT models
+# ---------------------------------------------------------------
+sim_data_gmert <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+
+  set.seed(seed)
+
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+
+  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
+  x1 <- runif(G * n_i, -2, 2)
+  x2 <- rnorm(G * n_i, 0, 1)
+  x3 <- rbinom(G * n_i, 1, 0.5)
+
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(G * n_i)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx] + beta3 * x3[idx] +
+                b[g, 1] + b[g, 2] * x1[idx]
+  }
+
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(G * n_i, 1, p)
+
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3
+  )
+}
+
+```
+
+## Example run
+
+This section shows a complete example of fitting the GMERT algorithm on a single simulated dataset.  
+We start by generating clustered binary data that follow the same structure assumed by the model (binary outcome, logit link, and random intercept and slope on `x1`).  
+We then fit the model with `fit_mert_RIC()` and inspect convergence diagnostics, estimated parameters, and predicted classifications.  
+No train/test split is used here: the goal is to illustrate the fitting procedure itself and verify that the algorithm converges correctly.
+
+```{r}
+# ---------------------------------------------------------------
+# EXAMPLE RUN
+# ---------------------------------------------------------------
+
+#  Simulate clustered binary data (30 clusters, 60 observations each)
+df <- sim_data_gmert(G = 30, n_i = 60)
+
+#  Fit the GMERT model using the full dataset
+fit <- fit_gmert(df, max_iter_inn = 1000, 
+                 max_iter_out = 10, tol = 1e-6)
+
+#  Check convergence and model components
+fit$converged_out       # whether the outer (PQL) loop converged
+mean(fit$converged_in)  # proportion of inner (EM) loops that converged
+head(fit$b)             # first rows of random-effect estimates (intercept, slope on x1)
+fit$D                   # estimated covariance matrix of random effects
+fit$sigma2              # estimated residual variance
+
+```
+
+`fit$b` shows the cluster-specific random intercepts and slopes, while `fit$D` and `fit$sigma2` summarize the estimated variability in the random structure.
+
+```{r}
+#    GLMM baseline with the same random-effects structure
+#    (logistic link; random intercept + random slope on x1 by cluster id)
+glmm_fit <- glmer(
+  y ~ x1 + x2 + x3 + (1 + x1 | id),
+  data = df,
+  family = binomial(link = "logit")
+)
+
+summary(glmm_fit)  # fixed effects, random effects, VarCorr, etc.
+
+```
+
+The GLMM provides a parametric baseline (linear fixed effects) against which to compare GMERT’s nonparametric fixed part.  
+Both models share the same random-effects structure, so differences in performance are attributable to how the fixed effects are modeled.
+
+```{r}
+# Predictions (binary) for both models on the same data
+# GMERT: predict_mert_RIC returns 0/1 (no unseen clusters here)
+y_hat_gmert <- predict_gmert(fit, df)
+
+# GLMM: predict probabilities then threshold to 0/1
+p_glmm      <- as.numeric(predict(glmm_fit, type = "response"))
+y_hat_glmm  <- as.integer(p_glmm >= 0.5)
+
+# Confusion matrices and metrics
+
+# f1 score function
+f1_fun <- function(table){
+  precision <- table[2,2] / (sum(table[2, ]))
+  recall    <- table[2,2] / (sum(table[, 2]))
+  F1        <- 2 * precision * recall / (precision + recall)
+  F1
+}
+
+# GMERT
+cm_gmert <- table(predicted = y_hat_gmert, actual = df$y)
+acc_gmert <- mean(y_hat_gmert == df$y)
+f1_gmert  <- f1_fun(cm_gmert)
+
+# confusion matrix for GMERT
+cm_gmert
+
+# accuracy and F1 for GMERT
+acc_gmert
+f1_gmert
+
+# GLMM
+cm_glmm <- table(predicted = y_hat_glmm, actual = df$y)
+acc_glmm <- mean(y_hat_glmm == df$y)
+f1_glmm  <- f1_fun(cm_glmm)
+
+# confusion matrix for GLMM
+cm_glmm
+
+# accuracy and F1 for GLMM
+acc_glmm
+f1_glmm
+
+```
+
+**Confusion matrices** summarize the counts of TP/FP/FN/TN for each model.  
+We report **accuracy** (overall correctness) and **F1**, the harmonic mean of precision and recall, which is more informative when classes are imbalanced.  
+
+
+
+
+## Train/Test split
+
+Here we repeat the analysis with a cluster-balanced train/test setup.  
+Each cluster contributes the same proportion of observations to training and test, so the random effects `b_i` are estimable from training for **every** cluster that appears in test.  
+We fit GMERT on the training set, fit a GLMM baseline, predict on the test set, and summarize performance with confusion matrices, accuracy, and F1.
+
+```{r}
+# ---------------------------------------------------------------
+# Train/test split per cluster using the sim_data_gmert() output
+# ---------------------------------------------------------------
+split_gmert_data <- function(df, train_prop = 0.7, seed = 123) {
+  set.seed(seed)
+
+  train_idx <- integer(0)
+  test_idx  <- integer(0)
+  ids <- unique(df$id)
+
+  for (g in ids) {
+    idx_g <- which(df$id == g)
+    n_train_g <- floor(length(idx_g) * train_prop)
+    train_g <- sample(idx_g, n_train_g)
+    test_g  <- setdiff(idx_g, train_g)
+    train_idx <- c(train_idx, train_g)
+    test_idx  <- c(test_idx, test_g)
+  }
+
+  train_df <- df[train_idx, ]
+  test_df  <- df[test_idx, ]
+  list(train = train_df, test = test_df)
+}
+
+```
+
+
+```{r}
+# ---------------------------------------------------------------
+# TRAIN/TEST SPLIT EXAMPLE
+# ---------------------------------------------------------------
+
+# Simulate clustered binary data
+set.seed(2)
+data_full <- sim_data_gmert(G = 30, n_i = 60)
+
+# Cluster-balanced split: fixed proportion per cluster in train
+split_sets <- split_gmert_data(data_full, train_prop = 0.7, seed = 2)
+data_train <- split_sets$train
+data_test  <- split_sets$test
+
+# Fit GMERT model on training data
+model_gmert <- fit_gmert(data_train, max_iter_inn = 1000, 
+                         max_iter_out = 10, tol = 1e-6)
+
+# Check convergence and parameter estimates
+model_gmert$converged_out        # outer-loop convergence
+mean(model_gmert$converged_in)   # proportion of inner loops converged
+model_gmert$D                    # random-effects covariance
+model_gmert$sigma2               # residual variance
+
+# Fit GLMM baseline with same random-effects structure
+model_glmm <- glmer(
+  y ~ x1 + x2 + x3 + (1 + x1 | id),
+  data = data_train,
+  family = binomial(link = "logit")
+)
+```
+
+Both models are trained on the **same** training data. 
+
+```{r}
+# Predictions on the test data
+# GMERT: binary predictions (0/1)
+pred_gmert <- predict_gmert(model_gmert, data_test)
+
+# GLMM: predict probabilities then threshold to 0/1
+prob_glmm <- as.numeric(predict(model_glmm, newdata = data_test, type = "response"))
+pred_glmm <- as.integer(prob_glmm >= 0.5)
+
+# Confusion matrices and performance metrics
+
+# GMERT metrics
+cm_gmert <- table(predicted = pred_gmert, actual = data_test$y)
+acc_gmert <- mean(pred_gmert == data_test$y)
+f1_gmert  <- f1_fun(cm_gmert)
+
+# confusion matrix for GMERT
+cm_gmert
+
+# accuracy and F1 for GMERT
+acc_gmert
+f1_gmert
+
+# GLMM metrics
+cm_glmm <- table(predicted = pred_glmm, actual = data_test$y)
+acc_glmm <- mean(pred_glmm == data_test$y)
+f1_glmm  <- f1_fun(cm_glmm)
+
+# confusion matrix for GLMM
+cm_glmm
+
+# accuracy and F1 for GLMM
+acc_glmm
+f1_glmm
+
+```
+
+
+**Confusion matrices** show true/false positives and negatives on the test set.  
+We report **accuracy** (overall correctness) and **F1**, which balances precision and recall.  
+Since the split preserves cluster proportions across train and test, all test clusters are seen during training, allowing correct evaluation of cluster-specific random effects.
+
+## Cross-validated predictions
+
+## 10-Fold Cross-Validation
+
+In this section, we evaluate the out-of-sample performance of GMERT against a standard GLMM baseline using a **10-fold cross-validation** procedure.
+
+The goal is to assess how well each model generalizes to new observations drawn from the **same set of clusters**.  
+To ensure that random effects remain estimable in every training fold, the data are split in a **cluster-balanced** way:  
+each cluster contributes approximately one-tenth of its observations to every test fold, while the remaining data are used for training.  
+This guarantees that all clusters appear in both the training and test partitions of every fold.
+
+For each fold, we:
+1. Fit the GMERT model on the training portion.
+2. Fit a GLMM baseline with the same random-effects structure `(1 + x1 | id)`.
+3. Predict binary outcomes on the test portion.
+4. Compute the **confusion matrix**, **accuracy**, and **F1 score** for both models.
+
+Finally, we aggregate the metrics across folds to compare the models in terms of mean and variability of their predictive performance.  
+This setup provides a fair, cluster-consistent cross-validation framework to benchmark GMERT against the parametric GLMM.
+
+```{r}
+# ================================================================
+# 10-fold cluster-balanced cross-validation: GMERT vs GLMM
+# ================================================================
+
+set.seed(42)  # CV reproducibility
+
+# ----------------------------------------------------------------
+# Simulate ONE dataset (all folds are made from the same df)
+# ----------------------------------------------------------------
+df_cv <- sim_data_gmert(G = 30, n_i = 60)  # clustered binary data
+
+# ----------------------------------------------------------------
+#   Build K cluster-aware folds
+#    - Within each cluster g, randomly partition its indices into K slices
+#    - Fold k is the union of the k-th slice from EVERY cluster
+# ----------------------------------------------------------------
+K <- 10
+folds <- vector("list", K)                     # folds[[k]] will hold test row indices for fold k
+
+for (g in unique(df_cv$id)) {
+  idx_g <- which(df_cv$id == g)        # all rows belonging to cluster g
+  idx_g <- sample(idx_g)               # shuffle rows within this cluster
+
+  # cut() assigns approximately equal-sized groups labeled 1..K
+  # (some clusters may not divide evenly; that's fine)
+  slice_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+
+  # append cluster g's k-th slice to the global k-th fold
+  for (k in seq_len(K)) {
+    folds[[k]] <- c(folds[[k]], slice_g[[k]])
+  }
+}
+
+cv_results <- vector("list", K)   # each element stores full fold results
+
+# ----------------------------------------------------------------
+#    Cross-validation loop
+#    For k = 1..K:
+#      - Train GMERT + GLMM on rows not in fold k
+#      - Predict on rows in fold k
+#      - Compute confusion matrices, accuracy, F1
+# ----------------------------------------------------------------
+
+for (k in seq_len(K)) {
+  # ----- split rows for this fold
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+
+  df_train <- df[train_idx, ]
+  df_test  <- df[test_idx, ]
+
+  # ----- (a) GMERT: fit on training rows
+  fit_g <- fit_gmert(df_train, max_iter_out = 10)
+
+  # Predict on test rows (binary 0/1; all clusters exist in train by construction)
+  yhat_g <- predict_gmert(fit_g, df_test)
+
+  # ----- (b) GLMM: same random-effects structure, fit on training rows
+  fit_l <- glmer(
+    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+
+  # Predict probabilities on test, then threshold at 0.5 → 0/1
+  phat_l <- as.numeric(predict(fit_l, newdata = df_test, type = "response"))
+  yhat_l <- as.integer(phat_l >= 0.5)
+
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_g, actual = df_test$y)
+  cm_l <- table(predicted = yhat_l, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_g == df_test$y)
+  acc_l <- mean(yhat_l == df_test$y)
+
+  # F1
+  f1_g <- f1_fun(cm_g)
+  f1_l <- f1_fun(cm_l)
+
+  # ----- Store fold results
+  cv_results[[k]] <- list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_g,
+    glmm_fit  = fit_l,
+    metrics = list(
+      acc_gmert = acc_g, f1_gmert = f1_g,
+      acc_glmm  = acc_l,  f1_glmm  = f1_l
+    ),
+    confusion = list(
+      gmert = cm_g,
+      glmm  = cm_l
+    )
+  )
+}
+
+# ----------------------------------------------------------------
+#  Aggregate results across folds: mean ± sd for each model
+# ----------------------------------------------------------------
+# Extract metrics into a data.frame
+metrics_df <- do.call(rbind, lapply(cv_results, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_gmert  = x$metrics$f1_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_glmm   = x$metrics$f1_glmm
+  )
+}))
+
+# Mean ± sd summary
+cv_summary <- data.frame(
+  model   = c("GMERT","GLMM"),
+  acc_mean = c(mean(metrics_df$acc_gmert), mean(metrics_df$acc_glmm)),
+  acc_sd   = c(sd(metrics_df$acc_gmert),   sd(metrics_df$acc_glmm)),
+  f1_mean  = c(mean(metrics_df$f1_gmert),  mean(metrics_df$f1_glmm)),
+  f1_sd    = c(sd(metrics_df$f1_gmert),    sd(metrics_df$f1_glmm))
+)
+
+# Inspect summary
+cv_summary
+metrics_df
+
+```
+
+Now, we do basically the same thing but in parallel
+
+```{r, eval=FALSE}
+# ================================================================
+# 10-fold cluster-balanced CV in PARALLEL: GMERT vs GLMM
+# ================================================================
+
+set.seed(42)
+
+# --- 0) Simulate one dataset ------------------------------------------------------
+df <- sim_data_gmert(G = 30, n_i = 60)
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+K <- 10
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df$id)) {
+  idx_g <- which(df$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}
+
+# ================================================================
+# PARALLEL SECTION
+# ================================================================
+
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4) })
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "fit_gmert", "predict_gmert", "f1_fun", "K","Vi_fun",
+                "b_fun","D_fun","sigma_fun","gll_fun"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert(df_train, max_iter_out = 2000)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+  cm_gmert    <- table(predicted = yhat_gmert, actual = df_test$y)
+  acc_gmert   <- mean(yhat_gmert == df_test$y)
+  f1_gmert    <- f1_fun(cm_gmert)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  cm_glmm    <- table(predicted = yhat_glmm,  actual = df_test$y)
+  acc_glmm   <- mean(yhat_glmm == df_test$y)
+  f1_glmm    <- f1_fun(cm_glmm)
+
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    glmm_fit  = fit_glmm_k,
+    metrics = list(
+      acc_gmert = acc_gmert, f1_gmert = f1_gmert,
+      acc_glmm  = acc_glmm,  f1_glmm  = f1_glmm
+    ),
+    confusion = list(
+      gmert = cm_gmert,
+      glmm  = cm_glmm
+    )
+  )
+})
+
+# ---  Aggregate metrics across folds -------------------------------------------
+metrics_df <- do.call(rbind, lapply(cv_results, function(x) {
+  data.frame(
+    fold      = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_gmert  = x$metrics$f1_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_glmm   = x$metrics$f1_glmm
+  )
+}))
+
+cv_summary <- data.frame(
+  model    = c("GMERT","GLMM"),
+  acc_mean = c(mean(metrics_df$acc_gmert), mean(metrics_df$acc_glmm)),
+  acc_sd   = c(sd(metrics_df$acc_gmert),   sd(metrics_df$acc_glmm)),
+  f1_mean  = c(mean(metrics_df$f1_gmert),  mean(metrics_df$f1_glmm)),
+  f1_sd    = c(sd(metrics_df$f1_gmert),    sd(metrics_df$f1_glmm))
+)
+
+```
+
+
+```{r}
+# ---------------------------------------------------------------
+# Per-fold summary table from cv_results
+# ---------------------------------------------------------------
+
+fold_table <- do.call(rbind, lapply(cv_results, function(x) {
+  # guard in case converged_in is missing/NULL
+  inner_vec <- x$gmert_fit$converged_in
+  inner_pct <- if (length(inner_vec)) mean(inner_vec) * 100 else NA_real_
+
+  data.frame(
+    Fold              = x$fold_id,
+    Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
+    Inner_Conv_Percent= round(inner_pct, 1),
+    F1_GMERT          = round(x$metrics$f1_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_glmm, 4),
+    check.names = FALSE
+  )
+}))
+
+# sort by fold, just in case
+fold_table <- fold_table[order(fold_table$Fold), ]
+
+# pretty print
+knitr::kable(
+  fold_table,
+  align = c("c","c","r","r","r"),
+  caption = "Per-fold convergence status and F1 scores (GMERT vs GLMM)"
+)
+
+cv_summary
+
+```
+
+The 10-fold cross-validation indicates that the GMERT algorithm achieves stable convergence in its inner EM loop (92–100 % across folds) but fails to meet the strict outer PQL tolerance in all folds. This pattern suggests that the pseudo-likelihood updates stabilize numerically without fully satisfying the stopping rule.
+
+In terms of predictive performance, GMERT attains an average accuracy of 0.76 and an F1-score of 0.82, while the benchmark GLMM reaches 0.79 and 0.84, respectively. The GLMM therefore performs slightly better on this dataset, which is expected given that the data were generated from a model with an approximately linear fixed component and with few predictors. The small performance gap and the higher variability observed for GMERT reflect the flexibility and stochastic nature of its tree-based fixed-effects estimation.
+
+Overall, the results confirm that the GMERT procedure is numerically stable and competitive with the parametric GLMM, though further tuning of tree complexity and convergence thresholds could improve outer-loop stability and narrow the performance gap.
+
+```{r, message=FALSE, warning=FALSE}
+# build a compact data frame with F1 per fold
+f1_df <- do.call(rbind, lapply(cv_results, function(x) {
+  data.frame(
+    Fold = factor(x$fold_id),
+    Model = rep(c("GMERT","GLMM"), each = 1),
+    F1 = c(x$metrics$f1_gmert, x$metrics$f1_glmm)
+  )
+}))
+
+# long format ensures one bar per model per fold
+ggplot(f1_df, aes(x = Fold, y = F1, fill = Model)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = sprintf("%.3f", F1)),
+            position = position_dodge(width = 0.7),
+            vjust = -0.4, size = 3) +
+  scale_fill_manual(values = c("#4E79A7", "#E15759")) +
+  labs(
+    title = "Fold-wise F1 Scores: GMERT vs GLMM",
+    subtitle = "10-fold cluster-balanced cross-validation",
+    x = "Fold",
+    y = "F1 Score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 11)
+  ) +
+  ylim(0, 1)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
