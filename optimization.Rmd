@@ -10,8 +10,11 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 ## Appendix – Derivation of the Small-System Formulas
 
+One of the things that makes the GMERT algorithm computationally expensive is the need to invert the matrix \(\hat V_i\) of size \(n_i\times n_i\) at each iteration for each group \(i\) for the updates of the random effects \(\hat b_i\), the residual variance \(\hat\sigma^2\), and the random-effects covariance \(\hat D\). What can make this feasible is that the number of random effects \(q\) is typically much smaller than the number of observations per group \(n_i\). Using the Woodbury matrix identity, we can rewrite these updates in terms of inverses of \(q\times q\) matrices instead of \(n_i\times n_i\) matrices, which is computationally much cheaper. This appendix derives these small-system formulas.
+
 ### 1. Original GMERT Updates
 
+First, we restate the relevant definitions from the GMERT paper. 
 At iteration \(m\), the paper defines the random-effects, residual, and covariance updates as:
 
 \[
@@ -54,6 +57,7 @@ All inverses are over the \(n_i\times n_i\) matrices \(\hat V_i\), which dominat
 
 ### 2. Woodbury Identity
 
+To derive small-system expressions, we use the Woodbury matrix identity:
 For matrices \(A\in\mathbb{R}^{n_i\times n_i}\), \(U\in\mathbb{R}^{n_i\times q}\),
 and \(C\in\mathbb{R}^{q\times q}\),
 \[
@@ -110,13 +114,53 @@ A_i = D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i.
 \tag{2}
 \]
 
+which is algebraically identical to the paper’s expression but only requires solving a \(q\times q\) system instead of an \(n_i\times n_i\) system.
+
+In R
+
+```{r}
+# b_fun_small: optimized GMERT random-effects update (small q×q system)
+b_fun_small <- function(G,        # number of clusters
+                        Z,        # N x q random-effects design matrix
+                        w,        # length N weights 
+                        D,        # q x q covariance of random effects
+                        sigma2,   # residual variance
+                        idx,      # list of length G, indices per cluster
+                        y_t,      # pseudo-response vector
+                        fhat      # fitted fixed-part predictions
+){
+  b <- matrix(0, G, ncol(Z))      # store b_i estimates (G x q)
+
+  for (g in seq_len(G)) {
+    # --- extract cluster-specific data ---
+    Zi <- Z[idx[[g]], , drop = FALSE]      # cluster design (n_i x q)
+    y_res <- y_t[idx[[g]]] - fhat[idx[[g]]]# residuals (y_t - fhat)
+
+    # --- compute small q×q system components ---
+    # A_i = D^{-1} + (1/σ²) * Z_i^T W_i Z_i
+    # rhs = (1/σ²) * Z_i^T W_i (y_t - fhat)
+    A   <- solve(D) + (1 / sigma2) * crossprod(Zi, w[idx[[g]]] * Zi)
+    rhs <- (1 / sigma2) * crossprod(Zi, w[idx[[g]]] * y_res)
+
+    # --- solve for b_i via Cholesky (stable) ---
+    R <- chol(A)
+    b[g, ] <- backsolve(R, forwardsolve(t(R), rhs))
+  }
+  b
+}
+
+```
+
+
 ---
 
 ### 4. Trace of \(V_i^{-1}\)
 
-Using (1) and the cyclic property of the trace,
+Using (1) and the cyclic property of the trace, \(\operatorname{tr}(ABC)=\operatorname{tr}(BCA)=\operatorname{tr}(CAB)\) (with \(A = W_i^{1/2}Z_i\), \(B=A_i^{-1}\), \(C=Z_i^{\!\top}W_i^{1/2}\)), we have
+
 \[
 \operatorname{tr}(V_i^{-1})
+= \operatorname{tr}\big(\sigma^{-2}I_{n_i}\big) - \operatorname{tr}\big(\sigma^{-4}W_i^{1/2}Z_i A_i^{-1} Z_i^{\!\top}W_i^{1/2}\big)
 = \frac{n_i}{\sigma^2}
 - \frac{1}{\sigma^4}\operatorname{tr}(A_i^{-1} Z_i^{\!\top}W_i Z_i).
 \tag{3}
@@ -203,22 +247,6 @@ Substituting (5) into the update gives the final efficient form:
 
 ---
 
-### 7. Summary – Paper vs. Small-System Forms
+## Summary of Small-System Formulas
 
-| Quantity | Paper formula | Equivalent small-system form | Inversion dimension |
-|-----------|----------------|------------------------------|---------------------|
-| \(b_i\) | \(D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}(y_i^{\sim}-f_i)\) | \(A_i^{-1}\sigma^{-2}Z_i^{\!\top}W_i(y_i^{\sim}-f_i)\) | \(q\times q\) |
-| \(\sigma^2\) | \(\tfrac{1}{N}\sum_i[\epsilon_i^{\!\top}\epsilon_i+\sigma^2(n_i-\sigma^2\operatorname{tr}(V_i^{-1}))]\) | \(\tfrac{1}{N}\sum_i[\epsilon_i^{\!\top}\epsilon_i+\operatorname{tr}(A_i^{-1}Z_i^{\!\top}W_i Z_i)]\) | \(q\times q\) |
-| \(D\) | \(D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D\) | \(A_i^{-1}\) | \(q\times q\) |
-
----
-
-### 8. Computational Implication
-
-All large \(n_i\times n_i\) matrix inversions are replaced by \(q\times q\) systems through the matrices
-
-\[
-A_i = D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i.
-\]
-
-Since typically \(q\in\{1,2,3\}\) and \(n_i\) can be 30–200, this reduces per-cluster cost from \(O(n_i^3)\) to \(O(q^3)\) while remaining *exactly algebraically equivalent* to the paper’s updates.
+All three updates can be computed using only \(q\times q\) matrix inverses, this reducing computational cost from \(O(n_i^3)\) to \(O(q^3)\) per group \(i\).
