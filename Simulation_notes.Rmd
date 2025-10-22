@@ -9,15 +9,11 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Libraries
+## External functions and packages
 
 ```{r}
 rm(list = ls())
-library(rpart)   # CART trees used for the fixed (nonlinear) component f(X)
-library(MASS)    # mvrnorm() to simulate correlated random effects for clusters
-library(lme4)    # glmer() to fit standard GLMMs for comparison
-library(parallel) # mclapply() for parallel computation
-library(ggplot2) # plotting
+source("functions.R")  # GMERT fitting and prediction functions and libraries
 ```
 
 

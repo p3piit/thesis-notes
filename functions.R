@@ -1,76 +1,22 @@
----
-title: "GMERT algorithm"
-author: "Paolo Colussi"
-date: "`r Sys.Date()`"
-output: html_document
----
+# This is the R script containing all the functions used for the thesis, the only purpose 
+# of this script is to be sourced in all the Rmd files where the processes are explained 
+# in a complite and detailed way. (Also has all the libraries)
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
+# Libraries (probably I should use renv but I'm lazy)
+library(tidyverse)
+library(rpart)   
+library(MASS)    
+library(lme4)   
+library(parallel) 
+library(ggplot2) 
 
-## GMERT
+##############################################################
+##############################################################
 
-Let $y_{ij}$ denote the binary response for the $j$-th observation ($j = 1, \ldots, n_i$) within cluster $i$ ($i = 1, \ldots, n$). 
-Conditional on the random effects $b_i$, the responses $y_{ij}$ are assumed independent and follow a Bernoulli distribution with parameter $\mu_{ij}$, that is,
-\[
-y_{ij} \mid b_i \sim \text{Bernoulli}(\mu_{ij}), 
-\qquad 
-\mathbb{E}(y_{ij} \mid b_i) = \mu_{ij}, 
-\qquad 
-\text{Var}(y_{ij} \mid b_i) = \mu_{ij}(1 - \mu_{ij}).
-\]
+##############################################################
+# From gmart_algo.Rmd
+##############################################################
 
-The relationship between the conditional mean $\mu_{ij}$ and the linear predictor $\eta_{ij}$ is specified through the canonical logit link function,
-\[
-\eta_{ij} = g(\mu_{ij}) = \log\!\left(\frac{\mu_{ij}}{1 - \mu_{ij}}\right).
-\]
-
-In the generalized mixed-effects regression tree (GMERT) model, the linear predictor is composed of a fixed component $f(x_{ij})$ and a random component $z_{ij}^{\top} b_i$, such that
-\[
-\eta_{ij} = f(x_{ij}) + z_{ij}^{\top} b_i,
-\qquad 
-b_i \sim \mathcal{N}(0, D),
-\]
-where $f(x_{ij})$ is an unknown function representing the fixed effects, estimated nonparametrically by means of a regression tree, $b_i$ is a vector of cluster-specific random effects with covariance matrix $D$ and $z_{ij}$ is the vector for the random effects.
-
-### Algorithm
-
-The GMERT algorithm is the ML-based PQL-EM-algorithm in which we replace the linear structure used to estimate the fixed part of the model by a standard tree structure. The algorithm is as follows:
-
-**Step 0**
-
-Let $M=0$. Starting from initial values for the conditional means $\hat\mu_{ij}^{(0)}$ (for binary data, one convenient choice is $\hat\mu_{ij}^{(0)}=0.25$ if $y_{ij}=0$ and $\hat\mu_{ij}^{(0)}=0.75$ if $y_{ij}=1$), define the linearized (working) responses and the associated weights according to the penalized quasi-likelihood (PQL) scheme. Specifically, set
-\[
-\tilde y_i^{(0)} \;=\; g\!\big(\hat\mu_i^{(0)}\big) \;+\; \big(y_i-\hat\mu_i^{(0)}\big)\odot g'\!\big(\hat\mu_i^{(0)}\big),
-\qquad 
-W_i^{(0)} \;=\; \mathrm{diag}\!\big(w_{ij}^{(0)}\big),
-\]
-with $g(\cdot)$ the logit link, $g'(\mu_{ij}) = [\mu_{ij}(1-\mu_{ij})]^{-1}$, and $w_{ij}^{(0)} = \big(v_{ij}\,g'(\hat\mu_{ij}^{(0)})^2\big)^{-1}$. For Bernoulli outcomes, $v_{ij}=\mu_{ij}(1-\mu_{ij})$, which yields the familiar working weights $w_{ij}^{(0)}=\hat\mu_{ij}^{(0)}\!\big(1-\hat\mu_{ij}^{(0)}\big)$. Using $(\tilde y_i^{(0)}, W_i^{(0)})$, fit a \emph{weighted} linear mixed-effects pseudo-model to obtain initial estimates $\hat\sigma^{2(0)}$ and $\hat D^{(0)}$. These values initialize the subsequent weighted MERT iterations that update the tree-based fixed part and the random effects under the PQL framework.\footnote{See GMERT algorithm initialization and binary special case for the definitions of $\tilde y$ and $w_{ij}$.}
-
-**Outer loop**
-
-After obtaining the initial estimates of the working responses $\tilde y_i^{(0)}$, the weights $W_i^{(0)}$, and the variance components $\hat\sigma^{2(0)}$ and $\hat D^{(0)}$, the outer loop is initialized by setting $M = 0$. This loop governs the successive updates of the working quantities $(\eta_i, \mu_i, \tilde y_i, W_i)$ within the PQL framework. At each outer iteration, the algorithm calls the inner weighted MERT procedure to update the fixed and random components, after which the working responses and weights are recomputed. The outer loop proceeds until convergence of the linear predictors $\eta_i$.
-
-**Start Inner loop**
-
-While the outer loop governs the PQL updates of the working responses and weights, the inner loop performs the weighted mixed-effects regression tree estimation using the current pseudo-data. For each outer iteration $M$, and while the generalized log-likelihood (GLL) has not yet converged, the following steps are repeated.
-
-**Step 1**
-
-At the beginning of the $m$-th inner iteration, compute the adjusted working responses
-\[
-\tilde y_i^{\ast(m)} = \tilde y_i^{(M)} - Z_i\,\hat b_i^{(m-1)}, \qquad i = 1, \ldots, n.
-\]
-A weighted regression tree is then fitted to the data $(\tilde y_i^{\ast(m)}, X_i, W_i^{(M)})$ using a standard tree algorithm, thereby yielding an updated estimate of the fixed component, denoted $\hat f^{(m)}(X_i)$. 
-The random effects are subsequently updated by the empirical best linear unbiased predictor (BLUP),
-\[
-\hat b_i^{(m)} = \hat D^{(m-1)}(W_i^{(M)1/2} Z_i)^{\top}
-\hat V_i^{-(m-1)} \!\left( W_i^{(M)1/2}\tilde y_i^{(M)} - W_i^{(M)1/2}\hat f^{(m)}(X_i) \right),
-\]
-
-In R:
-```{r b_fun}
 # b_fun: updates random effects b_i given current D and provided V_i
 #        w is a LIST with one diagonal weight matrix W_i per cluster
 b_fun <- function(G,    # number of clusters
@@ -86,25 +32,17 @@ b_fun <- function(G,    # number of clusters
   for (g in seq_len(G)) {
     Zi   <- Z[idx[[g]], , drop = FALSE]
     Wi_sq <- diag(sqrt(w[idx[[g]]]))                              # W_i^{1/2}
-
+    
     Zi_w <- Wi_sq %*% Zi                                          # W^{1/2} Z_i
     rhs  <-  Wi_sq %*% y_t[idx[[g]]] - Wi_sq %*% fhat[idx[[g]]]   # W^{1/2} (y - fhat)
-
+    
     b[g, ] <- D %*% t(Zi_w) %*% solve(Vi[[g]]) %*% rhs             # b_i = D (Z_w)^T V_i^{-1} rhs
   }
   b
 }
 
-```
+##############################################################
 
-
-where
-\[
-\hat V_i^{(m-1)} = W_i^{(M)1/2} Z_i\,\hat D^{(m-1)} (W_i^{(M)1/2} Z_i)^{\top} + \hat\sigma^{2(m-1)} I_{n_i}.
-\]
-
-In R:
-```{r Vi_fun}
 # Vi_fun: builds list of V_i = Z_i D Z_i^T + sigma^2 I_{n_i}
 Vi_fun <- function(Z,   # Z   : N x q random-effects design
                    D,   # D   : q x q covariance of random effects
@@ -112,7 +50,7 @@ Vi_fun <- function(Z,   # Z   : N x q random-effects design
                    G,   # G   : number of clusters
                    idx, # idx : list of row indices per cluster
                    w    # length N weights 
-                   ){
+){
   Vi <- list()
   for (g in seq_len(G)) {
     Zi <- Z[idx[[g]], , drop = FALSE]                                    # Z_i
@@ -124,26 +62,9 @@ Vi_fun <- function(Z,   # Z   : N x q random-effects design
   # list of length G with n_i x n_i covariance matrices V_i
   return(Vi)
 }
-```
 
-**Step 2**
+##############################################################
 
-Given the new estimates of the fixed and random parts, the variance parameters are updated according to
-\[
-\hat\sigma^{2(m)} = \frac{1}{N}\sum_{i=1}^{n}
-\left\{
-\hat\varepsilon_i^{(m)\top}\hat\varepsilon_i^{(m)} + \hat\sigma^{2(m-1)}\!\left[n_i - \hat\sigma^{2(m-1)} \operatorname{tr}\!\big(\hat V_i^{-(m-1)}\big)\right]
-\right\},
-\]
-
-with residuals
-\[
-\hat\varepsilon_i^{(m)} = W_i^{(M)1/2}\tilde y_i^{(M)} - W_i^{(M)1/2}\hat f^{(m)}(X_i) - W_i^{(M)1/2}Z_i\hat b_i^{(m)}.
-\]
-
-
-In R:
-```{r sigma_fun}
 # sigma_fun: updates sigma^2 using paper's closed-form expression
 sigma_fun <- function(N,    # N   : total number of observations
                       G,    # G   : number of clusters
@@ -156,32 +77,22 @@ sigma_fun <- function(N,    # N   : total number of observations
                       s2,   # s2  : scalar sigma^2 (residual variance; homoskedastic)
                       fhat, # fhat: current fixed-effect fit
                       w     # length N weights 
-                      ){
+){
   term_sum <- 0
   for (g in seq_len(G)) {
     Zi <- Z[idx[[g]], , drop = FALSE]
     Wi_sq <- diag(sqrt(w[idx[[g]]]))                    # W_i^{1/2}                         
     e <- Wi_sq %*% y[idx[[g]]] - Wi_sq %*% fhat[idx[[g]]] - Wi_sq %*% Zi%*% b[g, ]       #  weighted residuals epsilon_i = W_i^{1/2} y - W_i^{1/2} fhat - W_i^{1/2} Z_i b_i
     term_sum <- term_sum + crossprod(e) + s2 * (length(idx[[g]]) -
-                       s2 * sum(diag(solve(Vi[[g]]))))     # add cluster-i contribution
+                                                  s2 * sum(diag(solve(Vi[[g]]))))     # add cluster-i contribution
   }
   # Output:
   #   scalar sigma^2 new estimate
   term_sum / N                                             # divide by total N
 }
-```
 
-\[
-\hat D^{(m)} = \frac{1}{n}\sum_{i=1}^{n}
-\left\{
-\hat b_i^{(m)}\hat b_i^{(m)\top}
-+ \Big[\hat D^{(m-1)} - \hat D^{(m-1)} (W_i^{(M)1/2} Z_i)^{\top}
-\hat V_i^{-(m-1)} W_i^{(M)1/2} Z_i \hat D^{(m-1)}\Big]
-\right\},
-\]
+##############################################################
 
-In R:
-```{r D_fun}
 # D_fun: updates D using the paper's expression (average of b_i b_i^T plus shrinkage term)
 D_fun <- function(G,   # G   : number of clusters
                   idx, # idx : list of row indices per cluster
@@ -190,7 +101,7 @@ D_fun <- function(G,   # G   : number of clusters
                   D,   # D   : q x q covariance of random effects
                   Vi,  # Vi  : list of length G with V_i matrices (n_i x n_i)
                   w    # length N weights 
-                  ){
+){
   q <- ncol(Z)
   S <- matrix(0, q, q)                                     # accumulator
   for (g in seq_len(G)) {
@@ -204,24 +115,8 @@ D_fun <- function(G,   # G   : number of clusters
   #   q x q updated D
   S/G                                                      # average over clusters
 }
-```
 
-**Step 3**
-
-At each inner iteration, the following generalized log-likelihood (GLL) is computed:
-\[
-\mathrm{GLL}\big(f(X_i), b_i \mid y\big) =
-\sum_{i=1}^{n}
-\left\{
-\hat\varepsilon_i^{(m)\top}(\hat\sigma^{2(m)}I_{n_i})^{-1}\hat\varepsilon_i^{(m)}
-+ \hat b_i^{(m)\top}\hat D^{-(m)}\hat b_i^{(m)}
-+ \log|\hat D^{(m)}| + \log|\hat\sigma^{2(m)} I_{n_i}|
-\right\}.
-\]
-
-
-In R:
-```{r gll_fun}
+##############################################################
 
 # gll_fun: computes generalized log-likelihood (up to additive constant)
 gll_fun <- function(idx, # idx : list of row indices per cluster
@@ -232,7 +127,7 @@ gll_fun <- function(idx, # idx : list of row indices per cluster
                     s2,  # s2  : scalar sigma^2 (residual variance; homoskedastic)
                     fhat,# fhat: current fixed-effect fit
                     w    # length N weights 
-                    ){
+){
   logdetD <- as.numeric(determinant(D, logarithm = TRUE)$modulus)     # log|D|
   term_b <- sum(rowSums((b %*% solve(D)) * b))                         # sum_i b_i^T D^{-1} b_i
   term_r <- 0
@@ -251,20 +146,14 @@ gll_fun <- function(idx, # idx : list of row indices per cluster
   # + sum_i b_i^T D^{-1} b_i + G*log|D|
   term_r + term_logRi + term_b + length(idx) * logdetD                 # assemble GLL
 }
-```
 
-**End Inner loop**
+##############################################################
 
-The inner loop continues until the relative change in the GLL between two successive iterations is smaller than a predefined tolerance threshold. To check convergence we use the Aitken stop, *this is not in the paper*, and I'm really unsure if it good enough, but looks like it (*Indeed for now it's not used anymore, still here because why not*)
-
-In R:
-
-```{r ait_stop}
 # ait_stop: Aitken acceleration based stopping rule
 ait_stop <- function(gll,  #gll : numeric vector with GLL history (needs last three values)
                      tol,  #tol : tolerance for relative error to asymptote
                      it    #it  : current iteration index 
-                     ){
+){
   converged <- FALSE
   l1 <- gll[it + 2] - gll[it + 1]                                      # L_t
   l2 <- gll[it + 1] - gll[it]                                          # L_{t-1}
@@ -276,40 +165,14 @@ ait_stop <- function(gll,  #gll : numeric vector with GLL history (needs last th
   }
   converged                                                            # return flag
 }
-```
 
-**End Outer loop**
+##############################################################
 
-After convergence of the inner loop at outer iteration $M$, the working quantities are updated to prepare the next outer iteration. 
-The linear predictors are first recomputed as
-\[
-\hat\eta_i^{(M+1)} = \hat f^{(m)}(X_i) + Z_i\,\hat b_i^{(m)}, \qquad i = 1, \ldots, n,
-\]
-and the conditional means are obtained by applying the inverse of the logit link,
-\[
-\hat\mu_i^{(M+1)} = g^{-1}\!\big(\hat\eta_i^{(M+1)}\big) = 
-\frac{\exp\!\big(\hat\eta_i^{(M+1)}\big)}{1 + \exp\!\big(\hat\eta_i^{(M+1)}\big)}.
-\]
-The new pseudo-responses and weights are then derived as
-\[
-\tilde y_i^{(M+1)} = g\!\big(\hat\mu_i^{(M+1)}\big) 
-+ \big(y_i - \hat\mu_i^{(M+1)}\big)\, g'\!\big(\hat\mu_i^{(M+1)}\big),
-\qquad 
-W_i^{(M+1)} = \mathrm{diag}\!\big(w_{ij}^{(M+1)}\big),
-\]
-with $w_{ij}^{(M+1)} = \hat\mu_{ij}^{(M+1)} \big(1 - \hat\mu_{ij}^{(M+1)}\big)$. 
-The index $M$ is then increased by one, and the algorithm returns to the inner loop until the convergence of the linear predictors $\eta_i$ across successive outer iterations.
-
-### Implementation
-
-Here we put the algorithm in a single function with many parameter to be able to control the convergence and to be able to tune the tree from step 1. Also we have a convergence plot for the GLL, if we want to check visually the convergence. 
-
-```{r fit_fun}
 fit_gmert    <- function(df,               # df: data.frame with columns
-                                           #   id   : cluster identifier (factor or integer)
-                                           #   y    : numeric response
-                                           #   x1,x2,x3 : numeric covariates
-                                           #   leaf : true generating leaf (optional, for diagnostics)
+                         #   id   : cluster identifier (factor or integer)
+                         #   y    : numeric response
+                         #   x1,x2,x3 : numeric covariates
+                         #   leaf : true generating leaf (optional, for diagnostics)
                          max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                          max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
                          tol = 1e-6,           # convergence tolerance for both loops (Aitken or relative diff)
@@ -318,17 +181,17 @@ fit_gmert    <- function(df,               # df: data.frame with columns
                          minbucket = 20,       # minimum number of obs in any terminal node
                          maxdepth = 5,         # maximum tree depth
                          xval = 10             # number of cross-validation folds in rpart
-                         ) {
-
+) {
+  
   # --- Basic setup ---
   N <- nrow(df)                                 # total number of observations
   G <- length(unique(df$id))                    # number of clusters
   idx_by_cluster <- split(seq_len(N), df$id)    # list: row indices grouped by cluster
-
+  
   y <- df$y                                     # response vector
   Z <- cbind(1, df$x1)                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
-
+  
   # --- Initialization (Step 0) ---
   M <- 0L                                       # outer-loop counter
   mu <- ifelse(y == 1, 0.75, 0.25)              # initial conditional means
@@ -341,15 +204,15 @@ fit_gmert    <- function(df,               # df: data.frame with columns
   eta_old <- rep(0, N)                          # previous eta for outer-loop convergence check
   converged_in <- c()                           # inner-loop convergence flags (per outer iteration)
   converged_out <- FALSE                        # outer-loop convergence flag
-
+  
   # --- Outer loop (PQL updates) ---
   repeat {
     m = 0                                       # reset inner-loop counter
-
+    
     # --- Inner loop (EM-like iterations) ---
     repeat {
       m <- m + 1L
-
+      
       # (1.i) Partial E-step: compute adjusted pseudo-response y_tilde* = y_tilde - Z b
       zb <- numeric(N)                          # cluster-specific random contributions
       for (g in seq_len(G)) {
@@ -357,7 +220,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
         zb[idx] <- Z[idx, , drop = FALSE] %*% b[g, ]  # Z_i b_i
       }
       y_star <- y_t - zb                        # adjusted response for tree fit
-
+      
       # (1.ii) M-step: fit regression tree for fixed effects f(X)
       ctrl <- rpart.control(cp = cp, minsplit = minsplit, xval = xval,
                             minbucket = minbucket, maxdepth = maxdepth)
@@ -366,21 +229,21 @@ fit_gmert    <- function(df,               # df: data.frame with columns
                     data = cbind(y_star = y_star, Xdf),
                     weights = w, method = "anova", control = ctrl)
       fhat <- as.numeric(predict(tree, newdata = Xdf))
-
+      
       # (1.iii) Update random effects b_i
       Vi <- Vi_fun(Z = Z, D = D, s2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
       b <- b_fun(G = G, Z = Z, Vi = Vi, D = D, idx = idx_by_cluster,
                  y_t = y_t, fhat = fhat, w = w)                                   # update b_i estimates
-
+      
       # (2.i) Update sigma^2 (residual variance)
       sigma2 <- sigma_fun(N = N, G = G, idx = idx_by_cluster,
                           b = b, y = y_t, Z = Z, D = D,
                           Vi = Vi, s2 = sigma2, fhat = fhat, w = w)
-
+      
       # (2.ii) Update D (random-effects covariance)
       D <- D_fun(G = G, idx = idx_by_cluster,
                  Z = Z, D = D, Vi = Vi, b = b, w = w)
-
+      
       # --- Inner-loop convergence check (GLL stabilization) ---
       gll[m + 2] <- gll_fun(D = D, b = b, idx = idx_by_cluster,
                             Z = Z, y = y_t, fhat = fhat, s2 = sigma2, w = w)
@@ -388,7 +251,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
         rel <- abs(gll[m + 2] - gll[m + 1]) / (abs(gll[m + 1]) + 1e-12)
         if (rel < tol) { n_iter <- m; converged_in_t <- TRUE; break }
       }
-
+      
       if (m >= max_iter_inn) {                  # max-iteration guard
         n_iter <- m
         converged_in_t <- FALSE
@@ -396,7 +259,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
         break
       }
     }
-
+    
     # --- Outer-loop update (PQL step) ---
     converged_in <- c(converged_in, converged_in_t)
     zb <- numeric(N)
@@ -405,20 +268,20 @@ fit_gmert    <- function(df,               # df: data.frame with columns
       zb[idx] <- Z[idx, , drop = FALSE] %*% b[g, ]
     }
     eta <- fhat + zb                            # recompute linear predictor
-
+    
     # (Outer stopping rule – paper style)
     d_eta <- sqrt(mean((eta - eta_old)^2))      # RMS change of eta
     if (d_eta < tol) {
       converged_out <- TRUE
       break
     }
-
+    
     # Update working quantities for next outer iteration
     eta_old <- eta
     mu <- exp(eta) / (1 + exp(eta))             # updated conditional means
     y_t <- log(mu / (1 - mu)) + (y - mu) / (mu * (1 - mu))  # new pseudo-response
     w <- mu * (1 - mu)                          # new working weights
-
+    
     M <- M + 1L
     if (M >= max_iter_out) {                    # guard against outer non-convergence
       converged_out <- FALSE
@@ -426,7 +289,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
       break
     }
   }
-
+  
   # --- Return fitted components ---
   list(
     tree = tree,                   # fitted rpart tree (fixed-effects function f(X))
@@ -443,13 +306,8 @@ fit_gmert    <- function(df,               # df: data.frame with columns
   )
 }
 
-```
+##############################################################
 
-### Prediction
-
-To predict the response for a new observation that belongs to a cluster among those used to fit the MERT model, we use both its corresponding population-averaged tree prediction and the predicted random part corresponding to its cluster. For a new observation that belongs to a cluster not included in the sample used to estimate the model parameters, we can only take the corresponding population-averaged tree prediction.
-
-```{r}
 predict_gmert <- function(fit, new_df, thr = 0.5  
 ) {
   # fixed part: regression tree predictions using predictors only
@@ -466,15 +324,252 @@ predict_gmert <- function(fit, new_df, thr = 0.5
   if (any(seen)) {
     # add random effect contribution: row-wise sum of [1, x1] * b_i
     add[seen] <- rowSums(Znew[seen, , drop = FALSE] *
-                         fit$b[map[seen], ])
+                           fit$b[map[seen], ])
   }
   # total prediction = fixed part + random effects contribution
   eta   <- fhat + add
   p     <- 1 / (1 + exp(-eta))
-
+  
   # return 0/1; 
   yhat  <- ifelse(p >= thr, 1, 0)
   yhat
 }
-```
+
+##############################################################
+##############################################################
+
+##############################################################
+# From Simulation_notes.Rmd
+
+
+##############################################################
+
+sim_data_gmert <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+  
+  set.seed(seed)
+  
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+  
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+  
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+  
+  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
+  x1 <- runif(G * n_i, -2, 2)
+  x2 <- rnorm(G * n_i, 0, 1)
+  x3 <- rbinom(G * n_i, 1, 0.5)
+  
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(G * n_i)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx] + beta3 * x3[idx] +
+      b[g, 1] + b[g, 2] * x1[idx]
+  }
+  
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+  
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(G * n_i, 1, p)
+  
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3
+  )
+}
+
+##############################################################
+
+# ---------------------------------------------------------------
+# Train/test split per cluster using the sim_data_gmert() output
+# ---------------------------------------------------------------
+split_gmert_data <- function(df, train_prop = 0.7, seed = 123) {
+  set.seed(seed)
+  
+  train_idx <- integer(0)
+  test_idx  <- integer(0)
+  ids <- unique(df$id)
+  
+  for (g in ids) {
+    idx_g <- which(df$id == g)
+    n_train_g <- floor(length(idx_g) * train_prop)
+    train_g <- sample(idx_g, n_train_g)
+    test_g  <- setdiff(idx_g, train_g)
+    train_idx <- c(train_idx, train_g)
+    test_idx  <- c(test_idx, test_g)
+  }
+  
+  train_df <- df[train_idx, ]
+  test_df  <- df[test_idx, ]
+  list(train = train_df, test = test_df)
+}
+
+##############################################################
+##############################################################
+
+##############################################################
+# From optimization.Rmd
+
+##############################################################
+# Ainv_fun: precomputes A_i^{-1} (and optionally Z_i^T W_i Z_i) for all clusters
+Ainv_fun <- function(G,        # G      : number of clusters
+                     Z,        # Z      : N x q random-effects design
+                     w,        # W      : list of weigths 
+                     D,        # D      : q x q covariance of random effects (current)
+                     sigma2,   # sigma2 : residual variance (current)
+                     idx      # idx    : list length G with row indices for each cluster
+){
+  Ainv_list <- vector("list", G)
+  
+  Dinv <- solve(D)                                 # D^{-1} (q x q) once
+  
+  for (g in seq_len(G)) {
+    Zi  <- Z[idx[[g]], , drop = FALSE]             # n_i x q
+    Wi  <- diag(w[idx[[g]]])                      
+    ZtWZ <- t(Zi) %*% Wi %*% Zi                     # Z_i^T W_i Z_i (q x q)
+    
+    A <- Dinv + (1 / sigma2) * ZtWZ                # A_i
+    Ainv <- solve(A)                              # A_i^{-1} 
+    
+    Ainv_list[[g]] <- Ainv
+  }
+  
+  Ainv_list
+}
+
+##############################################################
+
+# b_fun_Ainv: updates random effects b_i using precomputed A_i^{-1}
+b_fun_small <- function(G,        # G      : number of clusters
+                        Z,        # Z      : N x q random-effects design
+                        w,        # W      : list of weigths 
+                        idx,      # idx    : list length G with row indices for each cluster
+                        y_t,      # y_t    : pseudo-response vector (length N)
+                        fhat,     # fhat   : fitted fixed-part prediction (length N)
+                        Ainv,     # Ainv   : list length G; each Ainv[[g]] = A_i^{-1} (q x q)
+                        sigma2    # sigma2 : residual variance (current)
+){
+  q <- ncol(Z)
+  b <- matrix(0, G, q)
+  
+  for (g in seq_len(G)) {
+    Zi   <- Z[idx[[g]], , drop = FALSE]           # n_i x q
+    Wi   <- diag(w[idx[[g]]])                     # weights vector (length n_i)
+    resid<- y_t[idx[[g]]] - fhat[idx[[g]]]        # (y_t - fhat) on cluster i
+    
+    rhs  <- (1 / sigma2) * t(Zi) %*% (Wi %*% resid)  # right-hand side
+    b[g, ] <- as.vector(Ainv[[g]] %*% rhs)           # b_i = A_i^{-1} * rhs
+  }
+  
+  b
+}
+
+##############################################################
+
+# sigma_fun_Ainv: updates residual variance sigma2 using precomputed A_i^{-1}
+sigma_fun_small <- function(N,        # N      : total number of rows
+                            G,        # G      : number of clusters
+                            idx,      # idx    : list length G with row indices for each cluster
+                            Z,        # Z      : N x q random-effects design
+                            w,        # W      : list of weigths
+                            y_t,      # y_t    : pseudo-response vector
+                            fhat,     # fhat   : fitted fixed-part prediction
+                            b,        # b      : matrix G x q with current random effects
+                            Ainv,     # Ainv   : list length G; each Ainv[[g]] = A_i^{-1}
+                            sigma2   # sigma2 : residual variance (current)
+){
+  rss_total <- 0
+  
+  for (g in seq_len(G)) {
+    Zi  <- Z[idx[[g]], , drop = FALSE]             # n_i x q
+    wi  <- diag(w[idx[[g]]])                             # weights matrix 
+    ni  <- length(wi)
+    
+    # residuals eps_i
+    eps_i <- diag(sqrt(w[idx[[g]]])) %*% (y_t[idx[[g]]] - fhat[idx[[g]]] - as.vector(Zi %*% b[g, ]))
+    
+    # tr(V_i^{-1})
+    trVi_inv <- (ni / sigma2) - (1 / sigma2^2) * sum(diag(Ainv[[g]] %*% t(Zi) %*% wi %*% Zi))
+    
+    # accumulate rss
+    rss_total <- rss_total + t(eps_i) %% eps_i + sigma2 * (ni - sigma2 * trVi_inv)
+  }
+  
+  rss_total / N
+}
+
+##############################################################
+
+# D_fun_Ainv: updates random-effects covariance D using precomputed A_i^{-1}
+D_fun_small <- function(G,        # G      : number of clusters
+                        b,        # b      : matrix G x q with current random effects
+                        Ainv      # Ainv   : list length G; each Ainv[[g]] = A_i^{-1}
+){
+  q <- ncol(b)
+  D_new <- matrix(0, q, q)
+  
+  for (g in seq_len(G)) {
+    D_new <- D_new + ( b %*% t(b) + Ainv[[g]] )   # b_i b_i^T + A_i^{-1}
+  }
+  
+  D_new / G
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
