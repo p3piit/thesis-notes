@@ -454,7 +454,7 @@ Ainv_fun <- function(G,        # G      : number of clusters
     Wi  <- diag(w[idx[[g]]])                      
     ZtWZ <- t(Zi) %*% Wi %*% Zi                     # Z_i^T W_i Z_i (q x q)
     
-    A <- Dinv + (1 / sigma2) * ZtWZ                # A_i
+    A <- Dinv + as.numeric((1 / sigma2)) * ZtWZ                # A_i
     Ainv <- solve(A)                              # A_i^{-1} 
     
     Ainv_list[[g]] <- Ainv
@@ -463,8 +463,8 @@ Ainv_fun <- function(G,        # G      : number of clusters
   Ainv_list
 }
 
-##############################################################
 
+##############################################################
 # b_fun_Ainv: updates random effects b_i using precomputed A_i^{-1}
 b_fun_small <- function(G,        # G      : number of clusters
                         Z,        # Z      : N x q random-effects design
@@ -483,7 +483,7 @@ b_fun_small <- function(G,        # G      : number of clusters
     Wi   <- diag(w[idx[[g]]])                     # weights vector (length n_i)
     resid<- y_t[idx[[g]]] - fhat[idx[[g]]]        # (y_t - fhat) on cluster i
     
-    rhs  <- (1 / sigma2) * t(Zi) %*% (Wi %*% resid)  # right-hand side
+    rhs  <- as.numeric((1 / sigma2)) * t(Zi) %*% (Wi %*% resid)  # right-hand side
     b[g, ] <- as.vector(Ainv[[g]] %*% rhs)           # b_i = A_i^{-1} * rhs
   }
   
@@ -491,7 +491,6 @@ b_fun_small <- function(G,        # G      : number of clusters
 }
 
 ##############################################################
-
 # sigma_fun_Ainv: updates residual variance sigma2 using precomputed A_i^{-1}
 sigma_fun_small <- function(N,        # N      : total number of rows
                             G,        # G      : number of clusters
@@ -515,17 +514,15 @@ sigma_fun_small <- function(N,        # N      : total number of rows
     eps_i <- diag(sqrt(w[idx[[g]]])) %*% (y_t[idx[[g]]] - fhat[idx[[g]]] - as.vector(Zi %*% b[g, ]))
     
     # tr(V_i^{-1})
-    trVi_inv <- (ni / sigma2) - (1 / sigma2^2) * sum(diag(Ainv[[g]] %*% t(Zi) %*% wi %*% Zi))
+    trVi_inv <- (ni / sigma2) - as.numeric((1 / sigma2^2)) * sum(diag(Ainv[[g]] %*% t(Zi) %*% wi %*% Zi))
     
     # accumulate rss
-    rss_total <- rss_total + t(eps_i) %% eps_i + sigma2 * (ni - sigma2 * trVi_inv)
+    rss_total <- rss_total + t(eps_i) %*% eps_i + sigma2 * (ni - sigma2 * trVi_inv)
   }
   
   rss_total / N
 }
-
 ##############################################################
-
 # D_fun_Ainv: updates random-effects covariance D using precomputed A_i^{-1}
 D_fun_small <- function(G,        # G      : number of clusters
                         b,        # b      : matrix G x q with current random effects
@@ -535,7 +532,7 @@ D_fun_small <- function(G,        # G      : number of clusters
   D_new <- matrix(0, q, q)
   
   for (g in seq_len(G)) {
-    D_new <- D_new + ( b %*% t(b) + Ainv[[g]] )   # b_i b_i^T + A_i^{-1}
+    D_new <- D_new + tcrossprod(b[g, ]) + Ainv[[g]]   # b_i b_i^T + A_i^{-1}
   }
   
   D_new / G
