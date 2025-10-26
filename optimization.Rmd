@@ -280,36 +280,143 @@ sigma_fun_small <- function(N,        # N      : total number of rows
 
 ### 6. Small-System Expression for \(D\)
 
-From the paper,
+For what concerns the matrix \(D\), the procedure is slightly more complex. 
+we start from the original update:
+
+At outer iteration \(m\), with \(U_i \equiv W_i^{1/2}Z_i\) the update is
 \[
-\hat D = \frac{1}{n}\sum_i\big[b_i b_i^{\!\top} + (D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D)\big].
+\hat D_{(m)} \;=\; \frac{1}{n}\sum_{i=1}^n\Big[
+\hat b_i^{(m)}\hat b_i^{(m)\top}
+\;+\;
+\big(
+\hat D_{(m-1)} - \hat D_{(m-1)}U_i^\top V_i^{-1}U_i\,\hat D_{(m-1)}
+\big)
+\Big].
+\tag{D.1}
 \]
-Use (1) and \(U_i=W_i^{1/2}Z_i\):
+
+As always we want to avoid the large \(n_i\times n_i\) inverse \(V_i^{-1}\), so we aim to replace it by a \(q\times q\) inverse.  
+
+Recall the definitiona
 \[
-D - D U_i^{\!\top}V_i^{-1}U_i D
-= D - D(\sigma^{-2}B_i - \sigma^{-4}B_iA_i^{-1}B_i)D,
-\quad B_i=Z_i^{\!\top}W_i Z_i.
+A_i \;\equiv\; \hat D_{(m-1)}^{-1} \;+\; \hat\sigma_{(m-1)}^{-2}\, Z_i^\top W_i Z_i
+\quad (\text{\(q\times q\)}).
+\tag{D.2}
 \]
-Applying the identity
+and 
 \[
-D - D(\sigma^{-2}B_i)D
-= (D^{-1}+\sigma^{-2}B_i)^{-1}=A_i^{-1},
+V_i^{-1} = \sigma^{-2}I - \sigma^{-4}U_i A^{-1} U_i^\top
 \]
-we obtain
+
+
+We will show
 \[
 \boxed{
-D - D(W^{1/2}Z_i)^{\!\top}V_i^{-1}W^{1/2}Z_i D
-= A_i^{-1}.
+\hat D_{(m-1)} - \hat D_{(m-1)}U_i^\top V_i^{-1}U_i\,\hat D_{(m-1)} \;=\; A_i^{-1}.
 }
-\tag{5}
+\tag{D.3}
 \]
-Substituting (5) into the update gives the final efficient form:
+Plugging (D.3) into (D.1) yields the optimized update
 \[
 \boxed{
-\hat D
-= \frac{1}{n}\sum_i \big[\hat b_i\hat b_i^{\!\top} + A_i^{-1}\big].
+\hat D_{(m)} \;=\; \frac{1}{n}\sum_{i=1}^n\Big[\hat b_i^{(m)}\hat b_i^{(m)\top} \;+\; A_i^{-1}\Big].
 }
-\tag{6}
+\tag{D.4}
+\]
+
+
+Consider the bracket in (D.1), suppressing the index \(i\) for readability:
+\[
+C \;\equiv\; D - D\,U^\top V^{-1} U\,D.
+\tag{D.5}
+\]
+Substitute $V^{-1}$ and expand:
+\[
+\begin{aligned}
+C
+&= D - D\,U^\top\big(\sigma^{-2}I - \sigma^{-4}U A^{-1}U^\top\big)U D \\
+&= D \;-\; \sigma^{-2}D\,U^\top U\,D \;+\; \sigma^{-4} D\,U^\top U\,A^{-1}\,U^\top U\,D.
+\end{aligned}
+\tag{D.6}
+\]
+With $B=\sigma^{-2}U^\top U = \sigma^2Z_i^\top W_iZ_i$, becomes
+\[
+C \;=\; D \;-\; D B D \;+\; D B A^{-1} B D.
+\tag{D.7}
+\]
+and $A_i$ becomes:
+\[
+A_i \;=\; D_i^{-1} + B_i.
+\]
+
+
+
+We now prove
+\[
+D \;-\; D B D \;+\; D B A^{-1} B D \;=\; A^{-1},
+\tag{D.8}
+\]
+
+Let $X = D - DBD + DBA^{-1}BD.$ We show \(A X = I\).
+
+Compute:
+\[
+AD = (D^{-1}+B)D = I + BD,\qquad
+ADBD = (I+BD)BD = BD + BDBD,
+\]
+\[
+ADB A^{-1}BD = (I+BD)BA^{-1}BD = BA^{-1}BD + BDBA^{-1}BD.
+\]
+Hence
+
+\[
+\begin{aligned}
+AX
+&= AD - ADBD + ADBA^{-1}BD \\
+&= (I+BD) - (BD+BDBD) + (BA^{-1}BD + BDBA^{-1}BD) \\
+&= I - BDBD + BA^{-1}BD + BDBA^{-1}BD. 
+\end{aligned}
+\tag{D.9}
+\]
+
+From \(A^{-1}(D^{-1}+B)=I\), multiply on the right by \(D\) to get
+\[
+A^{-1}BD = D - A^{-1}.
+\tag{D.10}
+\]
+Left-multiply (D.10) by \(B\) and by \(DB\), respectively:
+\[
+BA^{-1}BD = BD - BA^{-1}, \tag{D.11}
+\]
+\[
+DBA^{-1}BD = DBD - DBA^{-1}. \tag{D.12}
+\]
+Now left-multiply (D.12) by \(B\):
+\[
+BDBA^{-1}BD = BDBD - BDBA^{-1}. \tag{D.13}
+\]
+
+Substitute (D.11) and (D.13) into (D.9):
+\[
+AX = I - BDBD + (BD - BA^{-1}) + (BDBD - BDBA^{-1}) 
+= I + BD - \big(BA^{-1} + BDBA^{-1}\big).
+\]
+Factor the last bracket:
+\[
+BA^{-1} + BDBA^{-1} = B(I+DB)A^{-1}.
+\]
+But \(I+DB = D(D^{-1}+B) = DA\), hence \(B(I+DB)A^{-1} = BDAA^{-1} = BD\).
+Therefore \(AX = I + BD - BD = I\), proving \(X=A^{-1}\).
+
+Applying (D.8) to (D.7) shows \(C = A^{-1}\), which is (D.3).
+
+Combining (D.3) with the original update (D.1) yields
+\[
+\boxed{
+\hat D_{(m)} \;=\; \frac{1}{n}\sum_{i=1}^n\Big[\hat b_i^{(m)}\hat b_i^{(m)\top} \;+\; A_i^{-1}\Big],
+\qquad
+A_i \;=\; \hat D_{(m-1)}^{-1} + \hat\sigma_{(m-1)}^{-2}\, Z_i^\top W_i Z_i,
+}
 \]
 
 In R
@@ -357,6 +464,9 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
                          xval = 10             # number of cross-validation folds in rpart
                          ) {
 
+   # --- Start timer ---
+  time_start <- proc.time()              # records user, system, elapsed time
+  
   # --- Basic setup ---
   N <- nrow(df)                                 # total number of observations
   G <- length(unique(df$id))                    # number of clusters
@@ -462,6 +572,11 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
       break
     }
   }
+  
+  # --- Stop timer and compute elapsed time ---
+  time_end <- proc.time()
+  elapsed <- as.numeric((time_end - time_start)["elapsed"])   # total runtime in seconds
+
 
   # --- Return fitted components ---
   list(
@@ -475,7 +590,8 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
     n_iter = n_iter,               # iterations performed (inner loop)
     train_ids = df$id,             # cluster identifiers in training set
     gll = gll,                     # GLL trace (for diagnostics)
-    tol = tol                      # convergence tolerance used
+    tol = tol,                     # convergence tolerance used
+    time = elapsed                 # total runtime (seconds)
   )
 }
 
@@ -488,10 +604,22 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
 df <- sim_data_gmert(G = 30, n_i = 60)
 
 #  Fit the GMERT model using the full dataset
-system.time(fit_gmert(df, max_iter_inn = 1000, max_iter_out = 10, tol = 1e-6))
+fit1 <- fit_gmert(df, max_iter_inn = 1000, max_iter_out = 100, tol = 1e-6)
 
-system.time(fit_gmert_small(df, max_iter_inn = 1000, max_iter_out = 10, tol = 1e-6))
+fit2 <- fit_gmert_small(df, max_iter_inn = 1000, max_iter_out = 100, tol = 1e-6)
 
+#  Compare results
+round(fit1$b,10) == round(fit2$b,10)
+
+fit1$D
+fit2$D
+
+fit1$sigma2
+fit2$sigma2
+
+# compare computation times
+fit1$time
+fit2$time
 ```
 
 
