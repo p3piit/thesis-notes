@@ -2,7 +2,7 @@
 title: "optimization"
 author: "Paolo Colussi"
 date: "`r Sys.Date()`"
-output: html_document
+output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
@@ -11,7 +11,7 @@ source("functions.R")
 ```
 ## Appendix – Derivation of the Small-System Formulas
 
-One of the things that makes the GMERT algorithm computationally expensive is the need to invert the matrix \(\hat V_i\) of size \(n_i\times n_i\) at each iteration for each group \(i\) for the updates of the random effects \(\hat b_i\), the residual variance \(\hat\sigma^2\), and the random-effects covariance \(\hat D\). What can make this feasible is that the number of random effects \(q\) is typically much smaller than the number of observations per group \(n_i\). Using the Woodbury matrix identity, we can rewrite these updates in terms of inverses of \(q\times q\) matrices instead of \(n_i\times n_i\) matrices, which is computationally much cheaper. This appendix derives these small-system formulas.
+One of the things that makes the GMERT algorithm computationally expensive is the need to invert the matrix \(\hat V_j\) of size \(nj\times n_j\) at each iteration for each group \(j\) for the updates of the random effects \(\hat b_j\), the residual variance \(\hat\sigma^2\), and the random-effects covariance \(\hat D\). What can make this feasible is that the number of random effects \(q\) is typically much smaller than the number of observations per group \(n_j\). Using the Woodbury matrix identity, we can rewrite these updates in terms of inverses of \(q\times q\) matrices instead of \(n_j\times n_j\) matrices, which is computationally much cheaper. This appendix derives these small-system formulas.
 
 ### 1. Original GMERT Updates
 
@@ -20,98 +20,98 @@ At iteration \(m\), the paper defines the random-effects, residual, and covarian
 
 \[
 \begin{aligned}
-\hat b_i^{(m)} &=
-\hat D_{(m-1)} (W_i^{1/2(M)} Z_i)^{\!\top}
-\hat V_i^{-1(m-1)}
-W_i^{1/2(M)}\big(\tilde y_i^{(M)} - \hat f_{(m)}(X_i)\big), \\[4pt]
-\hat V_i^{(m-1)} &=
-W_i^{1/2(M)} Z_i \hat D_{(m-1)} Z_i^{\!\top} W_i^{1/2(M)}
-+ \hat\sigma_{(m-1)}^2 I_{n_i}, \\[6pt]
+\hat b_j^{(m)} &=
+\hat D_{(m-1)} (W_j^{1/2(M)} Z_j)^{\!\top}
+\hat V_j^{-1(m-1)}
+W_j^{1/2(M)}\big(\tilde y_j^{(M)} - \hat f_{(m)}(X_j)\big), \\[4pt]
+\hat V_j^{(m-1)} &=
+W_j^{1/2(M)} Z_j \hat D_{(m-1)} Z_j^{\!\top} W_j^{1/2(M)}
++ \hat\sigma_{(m-1)}^2 I_{n_j}, \\[6pt]
 \hat\sigma^2_{(m)} &=
-\frac{1}{N} \sum_{i=1}^{n}
+\frac{1}{N} \sum_{j=1}^{n}
 \Big\{
-\hat\epsilon_i^{\!\top}\hat\epsilon_i
-+ \hat\sigma^2_{(m-1)}\big[n_i - \hat\sigma^2_{(m-1)} \operatorname{tr}(\hat V_i^{-1(m-1)})\big]
+\hat\epsilon_i^{\!\top}\hat\epsilon_j
++ \hat\sigma^2_{(m-1)}\big[n_j - \hat\sigma^2_{(m-1)} \operatorname{tr}(\hat V_j^{-1(m-1)})\big]
 \Big\}, \\[6pt]
 \hat D_{(m)} &=
 \frac{1}{n}
-\sum_{i=1}^n
+\sum_{j=1}^n
 \Big\{
-\hat b_i^{(m)} \hat b_i^{(m)\top}
+\hat b_j^{(m)} \hat b_j^{(m)\top}
 +
 \big[
 \hat D_{(m-1)} -
-\hat D_{(m-1)}(W_i^{1/2}Z_i)^{\!\top}
-\hat V_i^{-1(m-1)} W_i^{1/2}Z_i \hat D_{(m-1)}
+\hat D_{(m-1)}(W_j^{1/2}Z_j)^{\!\top}
+\hat V_j^{-1(m-1)} W_j^{1/2}Z_j \hat D_{(m-1)}
 \big]
 \Big\},
 \end{aligned}
 \]
 with
 \[
-\hat\epsilon_i^{(m)} = W_i^{1/2}\big(\tilde y_i - \hat f_i - Z_i \hat b_i^{(m)}\big).
+\hat\epsilon_j^{(m)} = W_j^{1/2}\big(\tilde y_j - \hat f_j - Z_j \hat b_j^{(m)}\big).
 \]
 
-All inverses are over the \(n_i\times n_i\) matrices \(\hat V_i\), which dominates computational cost.
+All inverses are over the \(n_j\times n_j\) matrices \(\hat V_j\), which dominates computational cost.
 
 ---
 
 ### 2. Woodbury Identity
 
 To derive small-system expressions, we use the Woodbury matrix identity:
-For matrices \(A\in\mathbb{R}^{n_i\times n_i}\), \(U\in\mathbb{R}^{n_i\times q}\),
+For matrices \(A\in\mathbb{R}^{n_i\times n_j}\), \(U\in\mathbb{R}^{n_j\times q}\),
 and \(C\in\mathbb{R}^{q\times q}\),
 \[
 (A + UCU^{\!\top})^{-1}
 = A^{-1} - A^{-1}U\,(C^{-1}+U^{\!\top}A^{-1}U)^{-1}U^{\!\top}A^{-1}.
 \]
 
-Set \(A=\sigma^2 I_{n_i}\), \(U=W_i^{1/2}Z_i\), \(C=D\).
+Set \(A=\sigma^2 I_{n_j}\), \(U=W_j^{1/2}Z_j\), \(C=D\).
 Then
 \[
 \boxed{
-V_i^{-1}
-= \sigma^{-2}I_{n_i}
-- \sigma^{-4}W_i^{1/2}Z_i
-\big(D^{-1}+\sigma^{-2}Z_i^{\!\top}W_i Z_i\big)^{-1}
-Z_i^{\!\top}W_i^{1/2}.
+V_j^{-1}
+= \sigma^{-2}I_{n_j}
+- \sigma^{-4}W_j^{1/2}Z_j
+\big(D^{-1}+\sigma^{-2}Z_j^{\!\top}W_j Z_j\big)^{-1}
+Z_j^{\!\top}W_j^{1/2}.
 }
 \tag{1}
 \]
 
 Define
 \[
-A_i = D^{-1} + \sigma^{-2} Z_i^{\!\top} W_i Z_i
+A_j = D^{-1} + \sigma^{-2} Z_j^{\!\top} W_j Z_j
 \quad\text{(\(q\times q\) matrix).}
 \]
 
-In R we can implement \(A_i^{-1}\) as follows:
+In R we can implement \(A_j^{-1}\) as follows:
 
 ```{r}
-# Ainv_fun: precomputes A_i^{-1} (and optionally Z_i^T W_i Z_i) for all clusters
-Ainv_fun <- function(G,        # G      : number of clusters
+# Ajnv_fun: precomputes A_j^{-1} (and optionally Z_j^T W_j Z_j) for all clusters
+Ajnv_fun <- function(G,        # G      : number of clusters
                      Z,        # Z      : N x q random-effects design
                      w,        # W      : list of weigths 
                      D,        # D      : q x q covariance of random effects (current)
                      sigma2,   # sigma2 : residual variance (current)
                      idx      # idx    : list length G with row indices for each cluster
 ){
-  Ainv_list <- vector("list", G)
+  Ajnv_list <- vector("list", G)
 
-  Dinv <- solve(D)                                 # D^{-1} (q x q) once
+  Djnv <- solve(D)                                 # D^{-1} (q x q) once
 
   for (g in seq_len(G)) {
-    Zi  <- Z[idx[[g]], , drop = FALSE]             # n_i x q
-    Wi  <- diag(w[idx[[g]]])                      
-    ZtWZ <- t(Zi) %*% Wi %*% Zi                     # Z_i^T W_i Z_i (q x q)
+    Zj  <- Z[idx[[g]], , drop = FALSE]             # n_j x q
+    Wj  <- diag(w[idx[[g]]])                      
+    ZtWZ <- t(Zj) %*% Wj %*% Zj                     # Z_j^T W_j Z_j (q x q)
 
-    A <- Dinv + as.numeric((1 / sigma2)) * ZtWZ                # A_i
-    Ainv <- solve(A)                              # A_i^{-1} 
+    A <- Djnv + as.numeric((1 / sigma2)) * ZtWZ                # A_j
+    Ajnv <- solve(A)                              # A_j^{-1} 
 
-    Ainv_list[[g]] <- Ainv
+    Ajnv_list[[g]] <- Ajnv
   }
 
-  Ainv_list
+  Ajnv_list
 }
 
 ```
@@ -160,7 +160,7 @@ b_fun_small <- function(G,        # G      : number of clusters
                        idx,      # idx    : list length G with row indices for each cluster
                        y_t,      # y_t    : pseudo-response vector (length N)
                        fhat,     # fhat   : fitted fixed-part prediction (length N)
-                       Ainv,     # Ainv   : list length G; each Ainv[[g]] = A_i^{-1} (q x q)
+                       Ajnv,     # Ainv   : list length G; each Ainv[[g]] = A_i^{-1} (q x q)
                        sigma2    # sigma2 : residual variance (current)
 ){
   q <- ncol(Z)
@@ -448,11 +448,10 @@ All three updates can be computed using only \(q\times q\) matrix inverses, this
 We can now implement on R a new version of the GMERT updates using these small-system formulas. It is basically the same as the version in the gmert_algo.Rmd, except that we replace the b_fun, sigma_fun, and D_fun functions with the small-system versions derived here, and we add a call to Ainv_fun to precompute the \(A_i^{-1}\) matrices at each iteration. So we first of all have to call the function to compute the GLL.
 
 ```{r}
-fit_gmert_small    <- function(df,         # df: data.frame with columns
-                                           #   id   : cluster identifier (factor or integer)
-                                           #   y    : numeric response
-                                           #   x1,x2,x3 : numeric covariates
-                                           #   leaf : true generating leaf (optional, for diagnostics)
+fit_gmert_small    <- function(df,               # df: data.frame with columns
+                         id = "id",      # cluster identifier column name
+                         y = "y",        # response column name
+                         random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                          max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                          max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
                          tol = 1e-6,           # convergence tolerance for both loops (Aitken or relative diff)
@@ -463,16 +462,13 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
                          xval = 10             # number of cross-validation folds in rpart
                          ) {
 
-   # --- Start timer ---
-  time_start <- proc.time()              # records user, system, elapsed time
-  
   # --- Basic setup ---
   N <- nrow(df)                                 # total number of observations
-  G <- length(unique(df$id))                    # number of clusters
-  idx_by_cluster <- split(seq_len(N), df$id)    # list: row indices grouped by cluster
+  G <- length(unique(df[[id]]))                    # number of clusters
+  idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
 
-  y <- df$y                                     # response vector
-  Z <- cbind(1, df$x1)                          # random-effects design: intercept + slope on x1
+  y <- df[[y]]                                     # response vector
+  Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
 
   # --- Initialization (Step 0) ---
@@ -507,14 +503,14 @@ fit_gmert_small    <- function(df,         # df: data.frame with columns
       # (1.ii) M-step: fit regression tree for fixed effects f(X)
       ctrl <- rpart.control(cp = cp, minsplit = minsplit, xval = xval,
                             minbucket = minbucket, maxdepth = maxdepth)
-      Xdf <- data.frame(x1 = df$x1, x2 = df$x2, x3 = df$x3)
-      tree <- rpart(y_star ~ x1 + x2 + x3,
+      Xdf <- df[setdiff(names(df), c(id, y))]
+      tree <- rpart(y_star ~ .,
                     data = cbind(y_star = y_star, Xdf),
                     weights = w, method = "anova", control = ctrl)
       fhat <- as.numeric(predict(tree, newdata = Xdf))
 
       # (1.iii) Update random effects b_i
-      Ainv <- Ainv_fun(Z = Z, D = D, sigma2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
+      Ainv <- Ajnv_fun(Z = Z, D = D, sigma2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
       b <- b_fun_small(G = G, Z = Z, idx = idx_by_cluster,
                  y_t = y_t, fhat = fhat, w = w, sigma2 = sigma2, Ainv = Ainv)                                   # update b_i estimates
 
@@ -601,10 +597,9 @@ Obviously we can do the same for the GMERF model by replacing the relevant funct
 
 ```{r}
 fit_gmerf_small    <- function(df,               # df: data.frame with columns
-                                           #   id   : cluster identifier (factor or integer)
-                                           #   y    : numeric response
-                                           #   x1,x2,x3 : numeric covariates
-                                           #   leaf : true generating leaf (optional, for diagnostics)
+                         id = "id",      # cluster identifier column name
+                         y = "y",        # response column name
+                         random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                          max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                          max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
                          tol = 1e-6,           # convergence tolerance for both loops (Aitken or relative diff)     
@@ -617,11 +612,11 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
 
   # --- Basic setup ---
   N <- nrow(df)                                 # total number of observations
-  G <- length(unique(df$id))                    # number of clusters
-  idx_by_cluster <- split(seq_len(N), df$id)    # list: row indices grouped by cluster
+  G <- length(unique(df[[id]]))                    # number of clusters
+  idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
 
-  y <- df$y                                     # response vector
-  Z <- cbind(1, df$x1)                          # random-effects design: intercept + slope on x1
+  y <- df[[y]]                                     # response vector
+  Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
 
   # --- Initialization (Step 0) ---
@@ -654,7 +649,7 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
       y_star <- y_t - zb                        # adjusted response for tree fit
 
       # (1.ii) M-step: fit random forest to (y_tilde*, X, W)
-      Xrf <- data.frame(x1 = df$x1, x2 = df$x2, x3 = df$x3)
+      Xrf <- df[[setdiff(names(df), c(id, y))]]
       rf <- ranger::ranger(
         formula         = y_star ~ .,
         data            = cbind(y_star = y_star, Xrf),
@@ -670,7 +665,7 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
       fhat <- as.numeric(predict(rf, data = Xrf)$predictions)
 
       # (1.iii) Update random effects b_i
-      Ainv <- Ainv_fun(Z = Z, D = D, sigma2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
+      Ainv <- Ajnv_fun(Z = Z, D = D, sigma2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
       b <- b_fun_small(G = G, Z = Z, idx = idx_by_cluster,
                  y_t = y_t, fhat = fhat, w = w, sigma2 = sigma2, Ainv = Ainv)                                   # update b_i estimates
 
@@ -749,7 +744,7 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
 
 ## Testing
 
-```{r}
+```{r, eval=FALSE}
 #  Simulate clustered binary data (30 clusters, 60 observations each)
 df <- sim_data_gmert(G = 30, n_i = 60)
 
