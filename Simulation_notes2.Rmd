@@ -1,5 +1,5 @@
 ---
-title: "Simulation notes clustered binary data first setup"
+title: "Simulation notes clustered binary data second setup"
 author: "Paolo Colussi"
 date: "`r Sys.Date()`"
 output: pdf_document
