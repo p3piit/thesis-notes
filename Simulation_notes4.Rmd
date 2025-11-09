@@ -1,5 +1,5 @@
 ---
-title: "Simulation notes clustered binary data second setup"
+title: "Simulation notes clustered binary data third setup"
 author: "Paolo Colussi"
 date: "`r Sys.Date()`"
 output: pdf_document
@@ -28,9 +28,9 @@ This setup provides a realistic test bed for evaluating mixed-effects tree algor
 
 ```{r}
 # ---------------------------------------------------------------
-# sim_data_gmert: simulate clustered binary data for GMERT models
+# sim_data4: simulate clustered binary data for GMERT models
 # ---------------------------------------------------------------
-sim_data2 <- function(G = 50,          # number of clusters
+sim_data4 <- function(G = 50,          # number of clusters
                            n_i = 40,        # observations per cluster
                            beta0 = 0.5,     # fixed intercept
                            beta1 = 1.2,     # fixed effect for x1
@@ -53,16 +53,21 @@ sim_data2 <- function(G = 50,          # number of clusters
   # cluster identifiers
   id <- rep(1:G, each = n_i)
 
-  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
-  x1 <- runif(G * n_i, -2, 2)
-  x2 <- rnorm(G * n_i, 5, 1)
-  x3 <- rbinom(G * n_i, 1, 0.5)
+  # --- Create correlated predictors ---
+  N <- G * n_i
+  Sigma_X <- matrix(c(1, 0.9, 0.7,
+                      0.9, 1, 0.6,
+                      0.7, 0.6, 1), ncol = 3)
+  X <- MASS::mvrnorm(N, mu = c(0, 0, 0), Sigma = Sigma_X)
+  x1 <- X[,1]
+  x2 <- X[,2]
+  x3 <- ifelse(X[,3] > 0, 1, 0)
 
   # linear predictor: fixed part + random part (b0_i + b1_i * x1)
-  eta <- numeric(G * n_i)
+  eta <- numeric(N)
   for (g in seq_len(G)) {
     idx <- which(id == g)
-    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * log(x2[idx]) + beta3 * x3[idx] +
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx] + beta3 * x3[idx] +
                 b[g, 1] + b[g, 2] * x1[idx]
   }
 
@@ -70,7 +75,7 @@ sim_data2 <- function(G = 50,          # number of clusters
   p <- 1 / (1 + exp(-eta))
 
   # binary outcome drawn from Bernoulli(p)
-  y <- rbinom(G * n_i, 1, p)
+  y <- rbinom(N, 1, p)
 
   # return as data.frame ready for model fitting
   data.frame(
@@ -81,6 +86,7 @@ sim_data2 <- function(G = 50,          # number of clusters
     x3 = x3
   )
 }
+
 
 ```
 
@@ -97,11 +103,11 @@ No train/test split is used here: the goal is to illustrate the fitting procedur
 # ---------------------------------------------------------------
 
 #  Simulate clustered binary data (30 clusters, 60 observations each)
-df <- sim_data2(G = 30, n_i = 60)
+df <- sim_data4(G = 30, n_i = 60)
 
 #  Fit the GMERT model using the full dataset
-fit <- fit_gmerf_small(df, max_iter_inn = 10, 
-                 max_iter_out = 10, tol = 1e-6)
+fit <- fit_gmert_small(df, max_iter_inn = 10, 
+                 max_iter_out = 10, tol = 1e-4)
 
 #  Check convergence and model components
 fit$converged_out       # whether the outer (PQL) loop converged
@@ -133,7 +139,7 @@ Both models share the same random-effects structure, so differences in performan
 ```{r}
 # Predictions (binary) for both models on the same data
 # GMERT: predict_mert_RIC returns 0/1 (no unseen clusters here)
-y_hat_gmert <- predict_gmerf(fit, df)
+y_hat_gmert <- predict_gmert(fit, df)
 
 # GLMM: predict probabilities then threshold to 0/1
 p_glmm      <- as.numeric(predict(glmm_fit, type = "response"))
@@ -589,7 +595,7 @@ Now, we do basically the same thing but in parallel
 set.seed(42 )
 
 # --- 0) Simulate one dataset ------------------------------------------------------
-df <- sim_data2(G = 30, n_i = 60) 
+df <- sim_data3(G = 30, n_i = 60) 
 performance::icc(
   glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df, family = binomial())
 )  # check clustering strength

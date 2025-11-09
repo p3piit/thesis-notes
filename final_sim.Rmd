@@ -1,0 +1,1687 @@
+---
+title: "Simulation notes clustered binary final simulation stuff"
+author: "Paolo Colussi"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r}
+rm(list = ls())
+source("functions.R")  # GMERT fitting and prediction functions and libraries
+```
+
+## First genral simulation
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data_gmert: simulate clustered binary data for GMERT models
+# ---------------------------------------------------------------
+sim_data1 <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+
+  set.seed(seed)
+
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+
+  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
+  x1 <- runif(G * n_i, -2, 2)
+  x2 <- rnorm(G * n_i, 0, 1)
+  x3 <- rbinom(G * n_i, 1, 0.5)
+
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(G * n_i)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx] + beta3 * x3[idx] +
+                b[g, 1] + b[g, 2] * x1[idx]
+  }
+
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(G * n_i, 1, p)
+
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3
+  )
+}
+
+# ================================================================
+# 10-fold cluster-balanced CV in PARALLEL, GMERT vs GLMM vs others
+# ================================================================
+
+set.seed(42 )
+
+# --- 0) Simulate one dataset ------------------------------------------------------
+df1 <- sim_data1(G = 30, n_i = 60)
+performance::icc(
+  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df1, family = binomial())
+)  # check clustering strength
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+K <- 10
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df1$id)) {
+  idx_g <- which(df1$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}
+
+# ================================================================
+# PARALLEL SECTION
+# ================================================================
+
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+df <- df1
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+                "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
+              "fit_gmerf_small","predict_gmerf"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results_par1 <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 100, tol = 1e-4)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  
+  #GEMERF: fit and predict
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 100, tol = 1e-4)
+  yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
+
+  # Logit regression: fit and predict
+  logit_fit_k <- glm(y ~ x1 + x2 + x3, data = df_train, family = binomial())
+  p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
+  pred_logit  <- as.integer(p_logit >= 0.5)
+  
+  # Classification tree: fit and predict
+  df_train_ct <- df_train; df_train_ct$y <- factor(df_train_ct$y, levels = c(0,1))
+  df_test_ct  <- df_test;  df_test_ct$y  <- factor(df_test_ct$y,  levels = c(0,1))
+  ctree_fit_k <- rpart::rpart(
+    y ~ x1 + x2 + x3,
+    data = df_train_ct,
+    method = "class",
+    control = rpart::rpart.control(cp = 0.0, minsplit = 20, minbucket = 7, maxdepth = 5)
+  )
+  pred_ct_class_k <- predict(ctree_fit_k, newdata = df_test_ct, type = "class") # factor("0"/"1")
+  pred_ctree <- as.integer(as.character(pred_ct_class_k))
+  
+  # Random Forest: fit and predict
+  rf_fit_k <- ranger::ranger(
+    formula = y ~ x1 + x2 + x3,
+    data = df_train,
+    num.trees = 500,
+    mtry = 2,
+    min.node.size = 5,
+    classification = TRUE,
+    probability = FALSE,
+    seed = 42
+  )
+  pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
+  pred_rf <- as.integer(pred_rf)
+  
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_gmert, actual = df_test$y)
+  cm_l <- table(predicted = yhat_glmm, actual = df_test$y)
+  cm_logit <- table(predicted = pred_logit, actual = df_test$y)
+  cm_ctree <- table(predicted = pred_ctree, actual = df_test$y)
+  cm_rf <- table(predicted = pred_rf, actual = df_test$y)
+  cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
+  acc_logit <- mean(pred_logit == df_test$y)
+  acc_ctree <- mean(pred_ctree == df_test$y)
+  acc_rf <- mean(pred_rf == df_test$y)
+  acc_gmerf <- mean(yhat_gmerf == df_test$y)
+
+  # F1 score (magiority class)
+  f1_mag_g <- f1_fun(cm_g, magiority = TRUE)
+  f1_mag_l <- f1_fun(cm_l, magiority = TRUE)
+  f1_mag_logit <- f1_fun(cm_logit, magiority = TRUE)
+  f1_mag_ctree <- f1_fun(cm_ctree, magiority = TRUE)
+  f1_mag_rf <- f1_fun(cm_rf, magiority = TRUE)
+  f1_mag_gmerf <- f1_fun(cm_gmerf, magiority = TRUE)
+  
+  #F1 score (minority class)
+  f1_min_g <- f1_fun(cm_g, magiority = FALSE)
+  f1_min_l <- f1_fun(cm_l, magiority = FALSE)
+  f1_min_logit <- f1_fun(cm_logit, magiority = FALSE)
+  f1_min_ctree <- f1_fun(cm_ctree, magiority = FALSE)
+  f1_min_rf <- f1_fun(cm_rf, magiority = FALSE)
+  f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
+  
+  #Bias
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
+  bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
+  bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
+  bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
+  bias_gmerf <- sum(yhat_gmerf)/sum(df_test$y) - 1
+  
+  
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    gmerf_fit = fit_gmerf_k,
+    glmm_fit  = fit_glmm_k,
+    logit_fit = logit_fit_k,
+    ctree_fit = ctree_fit_k,
+    rf_fit    = rf_fit_k,
+    metrics = list(
+      acc_gmert = acc_g, f1_mag_gmert = f1_mag_g,
+      f1_min_gmert = f1_min_g, bias_gmert = bias_g,
+      acc_glmm  = acc_l,  f1_mag_glmm = f1_mag_l,
+      f1_min_glmm = f1_min_l, bias_glmm = bias_l,
+      acc_logit = acc_logit, f1_mag_logit = f1_mag_logit,
+      f1_min_logit = f1_min_logit, bias_logit = bias_logit,
+      acc_ctree = acc_ctree, f1_mag_ctree = f1_mag_ctree,
+      f1_min_ctree = f1_min_ctree, bias_ctree = bias_ctree,
+      acc_rf    = acc_rf,    f1_mag_rf    = f1_mag_rf,
+      f1_min_rf    = f1_min_rf, bias_rf = bias_rf,
+      acc_gmerf = acc_gmerf, f1_mag_gmerf = f1_mag_gmerf,
+      f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
+    ),
+    confusion = list(
+      gmert = cm_g,
+      gmerf = cm_gmerf,
+      glmm  = cm_l,
+      logit = cm_logit,
+      ctree = cm_ctree,
+      rf    = cm_rf
+    ), 
+    df_train = df_train,
+    df_test = df_test
+  )
+})
+
+# ---  Aggregate metrics across folds -------------------------------------------
+metrics_df_par1 <- do.call(rbind, lapply(cv_results_par1, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_mag_gmert  = x$metrics$f1_mag_gmert,
+    f1_min_gmert = x$metrics$f1_min_gmert,
+    bias_gmert = x$metrics$bias_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_mag_glmm = x$metrics$f1_mag_glmm,
+    f1_min_glmm = x$metrics$f1_min_glmm,
+    bias_glmm = x$metrics$bias_glmm,
+    acc_logit = x$metrics$acc_logit,
+    f1_mag_logit = x$metrics$f1_mag_logit,
+    f1_min_logit = x$metrics$f1_min_logit,
+    bias_logit = x$metrics$bias_logit,
+    acc_ctree = x$metrics$acc_ctree,
+    f1_mag_ctree = x$metrics$f1_mag_ctree,
+    f1_min_ctree = x$metrics$f1_min_ctree,
+    bias_ctree = x$metrics$bias_ctree,
+    acc_rf    = x$metrics$acc_rf,
+    f1_mag_rf = x$metrics$f1_mag_rf,
+    f1_min_rf = x$metrics$f1_min_rf,
+    bias_rf = x$metrics$bias_rf,
+    acc_gmerf = x$metrics$acc_gmerf,
+    f1_mag_gmerf = x$metrics$f1_mag_gmerf,
+    f1_min_gmerf = x$metrics$f1_min_gmerf,
+    bias_gmerf = x$metrics$bias_gmerf
+  )
+}))
+
+metrics_df_par <- metrics_df_par1
+
+cv_summary_par1 <- data.frame(
+  model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
+)
+
+
+# ---------------------------------------------------------------
+# Per-fold summary table from cv_results
+# ---------------------------------------------------------------
+
+fold_table_par1 <- do.call(rbind, lapply(cv_results_par1, function(x) {
+  # guard in case converged_in is missing/NULL
+  inner_vec <- x$gmert_fit$converged_in
+  inner_pct <- if (length(inner_vec)) mean(inner_vec) * 100 else NA_real_
+
+  data.frame(
+    Fold              = x$fold_id,
+    Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
+    Inner_Conv_Percent= round(inner_pct, 1),
+    F1_GMERT          = round(x$metrics$f1_mag_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_mag_glmm, 4),
+    logit_F1         = round(x$metrics$f1_mag_logit, 4),
+    CART_F1          = round(x$metrics$f1_mag_ctree, 4),
+    check.names = FALSE
+  )
+}))
+
+# sort by fold, just in case
+fold_table <- fold_table_par1[order(fold_table_par1$Fold), ]
+
+# pretty print
+knitr::kable(
+  fold_table,
+  align = c("c","c","r","r","r"),
+  rounding = 4,
+  caption = "Per-fold convergence status and F1 scores (GMERT, GLMM, Logit, CART, RF, GMERF)"
+)
+
+cv_summary_par1
+
+```
+
+
+## Second simulation non linear covariate effect
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data_gmert: simulate clustered binary data for GMERT models
+# ---------------------------------------------------------------
+sim_data2 <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+
+  set.seed(seed)
+
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+
+  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
+  x1 <- runif(G * n_i, -2, 2)
+  x2 <- rnorm(G * n_i, 5, 1)
+  x3 <- rbinom(G * n_i, 1, 0.5)
+
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(G * n_i)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * log(x2[idx]) + beta3 * x3[idx] +
+                b[g, 1] + b[g, 2] * x1[idx]
+  }
+
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(G * n_i, 1, p)
+
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3
+  )
+}
+
+
+# ================================================================
+# 10-fold cluster-balanced CV in PARALLEL: GMERT vs GLMM
+# ================================================================
+
+set.seed(42 )
+
+# --- 0) Simulate one dataset ------------------------------------------------------
+df2 <- sim_data2(G = 30, n_i = 60) 
+performance::icc(
+  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df2, family = binomial())
+)  # check clustering strength
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+K <- 10
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df2$id)) {
+  idx_g <- which(df2$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}
+
+# ================================================================
+# PARALLEL SECTION
+# ================================================================
+
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+df <- df2
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+                "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
+              "fit_gmerf_small","predict_gmerf"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results_par2 <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  
+  #GEMERF: fit and predict
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
+
+  # Logit regression: fit and predict
+  logit_fit_k <- glm(y ~ x1 + x2 + x3, data = df_train, family = binomial())
+  p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
+  pred_logit  <- as.integer(p_logit >= 0.5)
+  
+  # Classification tree: fit and predict
+  df_train_ct <- df_train; df_train_ct$y <- factor(df_train_ct$y, levels = c(0,1))
+  df_test_ct  <- df_test;  df_test_ct$y  <- factor(df_test_ct$y,  levels = c(0,1))
+  ctree_fit_k <- rpart::rpart(
+    y ~ x1 + x2 + x3,
+    data = df_train_ct,
+    method = "class",
+    control = rpart::rpart.control(cp = 0.0, minsplit = 20, minbucket = 7, maxdepth = 5)
+  )
+  pred_ct_class_k <- predict(ctree_fit_k, newdata = df_test_ct, type = "class") # factor("0"/"1")
+  pred_ctree <- as.integer(as.character(pred_ct_class_k))
+  
+  # Random Forest: fit and predict
+  rf_fit_k <- ranger::ranger(
+    formula = y ~ x1 + x2 + x3,
+    data = df_train,
+    num.trees = 500,
+    mtry = 2,
+    min.node.size = 5,
+    classification = TRUE,
+    probability = FALSE,
+    seed = 42
+  )
+  pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
+  pred_rf <- as.integer(pred_rf)
+  
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_gmert, actual = df_test$y)
+  cm_l <- table(predicted = yhat_glmm, actual = df_test$y)
+  cm_logit <- table(predicted = pred_logit, actual = df_test$y)
+  cm_ctree <- table(predicted = pred_ctree, actual = df_test$y)
+  cm_rf <- table(predicted = pred_rf, actual = df_test$y)
+  cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
+  acc_logit <- mean(pred_logit == df_test$y)
+  acc_ctree <- mean(pred_ctree == df_test$y)
+  acc_rf <- mean(pred_rf == df_test$y)
+  acc_gmerf <- mean(yhat_gmerf == df_test$y)
+
+  # F1 score (magiority class)
+  f1_mag_g <- f1_fun(cm_g, magiority = TRUE)
+  f1_mag_l <- f1_fun(cm_l, magiority = TRUE)
+  f1_mag_logit <- f1_fun(cm_logit, magiority = TRUE)
+  f1_mag_ctree <- f1_fun(cm_ctree, magiority = TRUE)
+  f1_mag_rf <- f1_fun(cm_rf, magiority = TRUE)
+  f1_mag_gmerf <- f1_fun(cm_gmerf, magiority = TRUE)
+  
+  #F1 score (minority class)
+  f1_min_g <- f1_fun(cm_g, magiority = FALSE)
+  f1_min_l <- f1_fun(cm_l, magiority = FALSE)
+  f1_min_logit <- f1_fun(cm_logit, magiority = FALSE)
+  f1_min_ctree <- f1_fun(cm_ctree, magiority = FALSE)
+  f1_min_rf <- f1_fun(cm_rf, magiority = FALSE)
+  f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
+  
+  #Bias
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
+  bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
+  bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
+  bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
+  bias_gmerf <- sum(yhat_gmerf)/sum(df_test$y) - 1
+  
+  
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    gmerf_fit = fit_gmerf_k,
+    glmm_fit  = fit_glmm_k,
+    logit_fit = logit_fit_k,
+    ctree_fit = ctree_fit_k,
+    rf_fit    = rf_fit_k,
+    metrics = list(
+      acc_gmert = acc_g, f1_mag_gmert = f1_mag_g,
+      f1_min_gmert = f1_min_g, bias_gmert = bias_g,
+      acc_glmm  = acc_l,  f1_mag_glmm = f1_mag_l,
+      f1_min_glmm = f1_min_l, bias_glmm = bias_l,
+      acc_logit = acc_logit, f1_mag_logit = f1_mag_logit,
+      f1_min_logit = f1_min_logit, bias_logit = bias_logit,
+      acc_ctree = acc_ctree, f1_mag_ctree = f1_mag_ctree,
+      f1_min_ctree = f1_min_ctree, bias_ctree = bias_ctree,
+      acc_rf    = acc_rf,    f1_mag_rf    = f1_mag_rf,
+      f1_min_rf    = f1_min_rf, bias_rf = bias_rf,
+      acc_gmerf = acc_gmerf, f1_mag_gmerf = f1_mag_gmerf,
+      f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
+    ),
+    confusion = list(
+      gmert = cm_g,
+      gmerf = cm_gmerf,
+      glmm  = cm_l,
+      logit = cm_logit,
+      ctree = cm_ctree,
+      rf    = cm_rf
+    ), 
+    df_train = df_train,
+    df_test = df_test
+  )
+})
+
+# ---  Aggregate metrics across folds -------------------------------------------
+metrics_df_par2 <- do.call(rbind, lapply(cv_results_par2, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_mag_gmert  = x$metrics$f1_mag_gmert,
+    f1_min_gmert = x$metrics$f1_min_gmert,
+    bias_gmert = x$metrics$bias_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_mag_glmm = x$metrics$f1_mag_glmm,
+    f1_min_glmm = x$metrics$f1_min_glmm,
+    bias_glmm = x$metrics$bias_glmm,
+    acc_logit = x$metrics$acc_logit,
+    f1_mag_logit = x$metrics$f1_mag_logit,
+    f1_min_logit = x$metrics$f1_min_logit,
+    bias_logit = x$metrics$bias_logit,
+    acc_ctree = x$metrics$acc_ctree,
+    f1_mag_ctree = x$metrics$f1_mag_ctree,
+    f1_min_ctree = x$metrics$f1_min_ctree,
+    bias_ctree = x$metrics$bias_ctree,
+    acc_rf    = x$metrics$acc_rf,
+    f1_mag_rf = x$metrics$f1_mag_rf,
+    f1_min_rf = x$metrics$f1_min_rf,
+    bias_rf = x$metrics$bias_rf,
+    acc_gmerf = x$metrics$acc_gmerf,
+    f1_mag_gmerf = x$metrics$f1_mag_gmerf,
+    f1_min_gmerf = x$metrics$f1_min_gmerf,
+    bias_gmerf = x$metrics$bias_gmerf)
+}))
+
+metrics_df_par <- metrics_df_par2
+
+cv_summary_par2 <- data.frame(
+  model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
+)
+
+
+# ---------------------------------------------------------------
+# Per-fold summary table from cv_results
+# ---------------------------------------------------------------
+
+fold_table_par2 <- do.call(rbind, lapply(cv_results_par2, function(x) {
+  # guard in case converged_in is missing/NULL
+  inner_vec <- x$gmert_fit$converged_in
+  inner_pct <- if (length(inner_vec)) mean(inner_vec) * 100 else NA_real_
+
+  data.frame(
+    Fold              = x$fold_id,
+    Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
+    Inner_Conv_Percent= round(inner_pct, 1),
+    F1_GMERT          = round(x$metrics$f1_mag_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_mag_glmm, 4),
+    logit_F1         = round(x$metrics$f1_mag_logit, 4),
+    CART_F1          = round(x$metrics$f1_mag_ctree, 4),
+    check.names = FALSE
+  )
+}))
+
+# sort by fold, just in case
+fold_table <- fold_table_par2[order(fold_table_par2$Fold), ]
+
+# pretty print
+knitr::kable(
+  fold_table,
+  align = c("c","c","r","r","r"),
+  rounding = 4,
+  caption = "Per-fold convergence status and F1 scores (GMERT, GLMM, Logit, CART, RF, GMERF)"
+)
+
+cv_summary_par2
+
+```
+
+
+## Third simulation interaction between covariates
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data_gmert: simulate clustered binary data for GMERT models
+# ---------------------------------------------------------------
+sim_data3 <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+
+  set.seed(seed)
+
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+
+  # generate covariates: x1 (uniform), x2 (normal), x3 (binary)
+  x1 <- runif(G * n_i, -2, 2)
+  x2 <- rnorm(G * n_i, 5, 1)
+  x3 <- rbinom(G * n_i, 1, 0.5)
+  x4 <- rbinom(G * n_i, 1, 0.5)
+
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(G * n_i)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx]*x4[idx] + beta3 * x3[idx] +
+                b[g, 1] + b[g, 2] * x1[idx]
+  }
+
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(G * n_i, 1, p)
+
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3,
+    x4 = x4
+  )
+}
+
+
+# ================================================================
+# 10-fold cluster-balanced CV in PARALLEL: GMERT vs GLMM
+# ================================================================
+
+set.seed(42 )
+
+# --- 0) Simulate one dataset ------------------------------------------------------
+df3 <- sim_data3(G = 30, n_i = 60) 
+performance::icc(
+  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df3, family = binomial())
+)  # check clustering strength
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+K <- 10
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df3$id)) {
+  idx_g <- which(df3$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}
+
+# ================================================================
+# PARALLEL SECTION
+# ================================================================
+
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+df <- df3
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+                "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
+              "fit_gmerf_small","predict_gmerf"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results_par3 <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    y ~ x1 + x2 + x3 + x4 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  
+  #GEMERF: fit and predict
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
+
+  # Logit regression: fit and predict
+  logit_fit_k <- glm(y ~ x1 + x2 + x3 + x4, data = df_train, family = binomial())
+  p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
+  pred_logit  <- as.integer(p_logit >= 0.5)
+  
+  # Classification tree: fit and predict
+  df_train_ct <- df_train; df_train_ct$y <- factor(df_train_ct$y, levels = c(0,1))
+  df_test_ct  <- df_test;  df_test_ct$y  <- factor(df_test_ct$y,  levels = c(0,1))
+  ctree_fit_k <- rpart::rpart(
+    y ~ x1 + x2 + x3,
+    data = df_train_ct,
+    method = "class",
+    control = rpart::rpart.control(cp = 0.0, minsplit = 20, minbucket = 7, maxdepth = 5)
+  )
+  pred_ct_class_k <- predict(ctree_fit_k, newdata = df_test_ct, type = "class") # factor("0"/"1")
+  pred_ctree <- as.integer(as.character(pred_ct_class_k))
+  
+  # Random Forest: fit and predict
+  rf_fit_k <- ranger::ranger(
+    formula = y ~ x1 + x2 + x3,
+    data = df_train,
+    num.trees = 500,
+    mtry = 2,
+    min.node.size = 5,
+    classification = TRUE,
+    probability = FALSE,
+    seed = 42
+  )
+  pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
+  pred_rf <- as.integer(pred_rf)
+  
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_gmert, actual = df_test$y)
+  cm_l <- table(predicted = yhat_glmm, actual = df_test$y)
+  cm_logit <- table(predicted = pred_logit, actual = df_test$y)
+  cm_ctree <- table(predicted = pred_ctree, actual = df_test$y)
+  cm_rf <- table(predicted = pred_rf, actual = df_test$y)
+  cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
+  acc_logit <- mean(pred_logit == df_test$y)
+  acc_ctree <- mean(pred_ctree == df_test$y)
+  acc_rf <- mean(pred_rf == df_test$y)
+  acc_gmerf <- mean(yhat_gmerf == df_test$y)
+
+  # F1 score (magiority class)
+  f1_mag_g <- f1_fun(cm_g, magiority = TRUE)
+  f1_mag_l <- f1_fun(cm_l, magiority = TRUE)
+  f1_mag_logit <- f1_fun(cm_logit, magiority = TRUE)
+  f1_mag_ctree <- f1_fun(cm_ctree, magiority = TRUE)
+  f1_mag_rf <- f1_fun(cm_rf, magiority = TRUE)
+  f1_mag_gmerf <- f1_fun(cm_gmerf, magiority = TRUE)
+  
+  #F1 score (minority class)
+  f1_min_g <- f1_fun(cm_g, magiority = FALSE)
+  f1_min_l <- f1_fun(cm_l, magiority = FALSE)
+  f1_min_logit <- f1_fun(cm_logit, magiority = FALSE)
+  f1_min_ctree <- f1_fun(cm_ctree, magiority = FALSE)
+  f1_min_rf <- f1_fun(cm_rf, magiority = FALSE)
+  f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
+  
+  #Bias
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
+  bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
+  bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
+  bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
+  bias_gmerf <- sum(yhat_gmerf)/sum(df_test$y) - 1
+  
+  
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    gmerf_fit = fit_gmerf_k,
+    glmm_fit  = fit_glmm_k,
+    logit_fit = logit_fit_k,
+    ctree_fit = ctree_fit_k,
+    rf_fit    = rf_fit_k,
+    metrics = list(
+      acc_gmert = acc_g, f1_mag_gmert = f1_mag_g,
+      f1_min_gmert = f1_min_g, bias_gmert = bias_g,
+      acc_glmm  = acc_l,  f1_mag_glmm = f1_mag_l,
+      f1_min_glmm = f1_min_l, bias_glmm = bias_l,
+      acc_logit = acc_logit, f1_mag_logit = f1_mag_logit,
+      f1_min_logit = f1_min_logit, bias_logit = bias_logit,
+      acc_ctree = acc_ctree, f1_mag_ctree = f1_mag_ctree,
+      f1_min_ctree = f1_min_ctree, bias_ctree = bias_ctree,
+      acc_rf    = acc_rf,    f1_mag_rf    = f1_mag_rf,
+      f1_min_rf    = f1_min_rf, bias_rf = bias_rf,
+      acc_gmerf = acc_gmerf, f1_mag_gmerf = f1_mag_gmerf,
+      f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
+    ),
+    confusion = list(
+      gmert = cm_g,
+      gmerf = cm_gmerf,
+      glmm  = cm_l,
+      logit = cm_logit,
+      ctree = cm_ctree,
+      rf    = cm_rf
+    ), 
+    df_train = df_train,
+    df_test = df_test
+  )
+})
+
+# ---  Aggregate metrics across folds -------------------------------------------
+metrics_df_par3 <- do.call(rbind, lapply(cv_results_par3, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_mag_gmert  = x$metrics$f1_mag_gmert,
+    f1_min_gmert = x$metrics$f1_min_gmert,
+    bias_gmert = x$metrics$bias_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_mag_glmm = x$metrics$f1_mag_glmm,
+    f1_min_glmm = x$metrics$f1_min_glmm,
+    bias_glmm = x$metrics$bias_glmm,
+    acc_logit = x$metrics$acc_logit,
+    f1_mag_logit = x$metrics$f1_mag_logit,
+    f1_min_logit = x$metrics$f1_min_logit,
+    bias_logit = x$metrics$bias_logit,
+    acc_ctree = x$metrics$acc_ctree,
+    f1_mag_ctree = x$metrics$f1_mag_ctree,
+    f1_min_ctree = x$metrics$f1_min_ctree,
+    bias_ctree = x$metrics$bias_ctree,
+    acc_rf    = x$metrics$acc_rf,
+    f1_mag_rf = x$metrics$f1_mag_rf,
+    f1_min_rf = x$metrics$f1_min_rf,
+    bias_rf = x$metrics$bias_rf,
+    acc_gmerf = x$metrics$acc_gmerf,
+    f1_mag_gmerf = x$metrics$f1_mag_gmerf,
+    f1_min_gmerf = x$metrics$f1_min_gmerf,
+    bias_gmerf = x$metrics$bias_gmerf)
+}))
+
+metrics_df_par <- metrics_df_par3
+cv_summary_par3 <- data.frame(
+  model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
+)
+
+
+# ---------------------------------------------------------------
+# Per-fold summary table from cv_results
+# ---------------------------------------------------------------
+
+fold_table_par3 <- do.call(rbind, lapply(cv_results_par3, function(x) {
+  # guard in case converged_in is missing/NULL
+  inner_vec <- x$gmert_fit$converged_in
+  inner_pct <- if (length(inner_vec)) mean(inner_vec) * 100 else NA_real_
+
+  data.frame(
+    Fold              = x$fold_id,
+    Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
+    Inner_Conv_Percent= round(inner_pct, 1),
+    F1_GMERT          = round(x$metrics$f1_mag_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_mag_glmm, 4),
+    logit_F1         = round(x$metrics$f1_mag_logit, 4),
+    CART_F1          = round(x$metrics$f1_mag_ctree, 4),
+    check.names = FALSE
+  )
+}))
+
+# sort by fold, just in case
+fold_table <- fold_table_par3[order(fold_table_par3$Fold), ]
+
+# pretty print
+knitr::kable(
+  fold_table,
+  align = c("c","c","r","r","r"),
+  rounding = 4,
+  caption = "Per-fold convergence status and F1 scores (GMERT, GLMM, Logit, CART, RF, GMERF)"
+)
+
+cv_summary_par3
+
+```
+
+## Fourth simulation with multicollinear predictors
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data4: simulate clustered binary data for GMERT models
+# ---------------------------------------------------------------
+sim_data4 <- function(G = 50,          # number of clusters
+                           n_i = 40,        # observations per cluster
+                           beta0 = 0.5,     # fixed intercept
+                           beta1 = 1.2,     # fixed effect for x1
+                           beta2 = -0.8,    # fixed effect for x2
+                           beta3 = 0.6,     # fixed effect for x3
+                           sigma_b0 = 0.8,  # SD of random intercept
+                           sigma_b1 = 0.5,  # SD of random slope for x1
+                           rho = 0.2,       # correlation between b0 and b1
+                           seed = 123) {    # random seed for reproducibility
+
+  set.seed(seed)
+
+  # covariance matrix of random effects (b0_i, b1_i)
+  D <- matrix(c(sigma_b0^2, rho * sigma_b0 * sigma_b1,
+                rho * sigma_b0 * sigma_b1, sigma_b1^2), 2, 2)
+
+  # generate random effects for G clusters
+  b <- MASS::mvrnorm(G, mu = c(0, 0), Sigma = D)
+
+  # cluster identifiers
+  id <- rep(1:G, each = n_i)
+
+  # --- Create correlated predictors ---
+  N <- G * n_i
+  Sigma_X <- matrix(c(1, 0.9, 0.7,
+                      0.9, 1, 0.6,
+                      0.7, 0.6, 1), ncol = 3)
+  X <- MASS::mvrnorm(N, mu = c(0, 0, 0), Sigma = Sigma_X)
+  x1 <- X[,1]
+  x2 <- X[,2]
+  x3 <- ifelse(X[,3] > 0, 1, 0)
+
+  # linear predictor: fixed part + random part (b0_i + b1_i * x1)
+  eta <- numeric(N)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx] + beta3 * x3[idx] +
+                b[g, 1] + b[g, 2] * x1[idx]
+  }
+
+  # convert to probabilities via logistic link
+  p <- 1 / (1 + exp(-eta))
+
+  # binary outcome drawn from Bernoulli(p)
+  y <- rbinom(N, 1, p)
+
+  # return as data.frame ready for model fitting
+  data.frame(
+    id = factor(id),
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    x3 = x3
+  )
+}
+
+
+# ================================================================
+# 10-fold cluster-balanced CV in PARALLEL: GMERT vs GLMM
+# ================================================================
+
+set.seed(42 )
+
+# --- 0) Simulate one dataset ------------------------------------------------------
+df4 <- sim_data4(G = 30, n_i = 60) 
+performance::icc(
+  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df4, family = binomial())
+)  # check clustering strength
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+K <- 10
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df4$id)) {
+  idx_g <- which(df4$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}
+
+# ================================================================
+# PARALLEL SECTION
+# ================================================================
+
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+df <- df4
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+                "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
+              "fit_gmerf_small","predict_gmerf"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results_par4 <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  
+  #GEMERF: fit and predict
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
+
+  # Logit regression: fit and predict
+  logit_fit_k <- glm(y ~ x1 + x2 + x3, data = df_train, family = binomial())
+  p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
+  pred_logit  <- as.integer(p_logit >= 0.5)
+  
+  # Classification tree: fit and predict
+  df_train_ct <- df_train; df_train_ct$y <- factor(df_train_ct$y, levels = c(0,1))
+  df_test_ct  <- df_test;  df_test_ct$y  <- factor(df_test_ct$y,  levels = c(0,1))
+  ctree_fit_k <- rpart::rpart(
+    y ~ x1 + x2 + x3,
+    data = df_train_ct,
+    method = "class",
+    control = rpart::rpart.control(cp = 0.0, minsplit = 20, minbucket = 7, maxdepth = 5)
+  )
+  pred_ct_class_k <- predict(ctree_fit_k, newdata = df_test_ct, type = "class") # factor("0"/"1")
+  pred_ctree <- as.integer(as.character(pred_ct_class_k))
+  
+  # Random Forest: fit and predict
+  rf_fit_k <- ranger::ranger(
+    formula = y ~ x1 + x2 + x3,
+    data = df_train,
+    num.trees = 500,
+    mtry = 2,
+    min.node.size = 5,
+    classification = TRUE,
+    probability = FALSE,
+    seed = 42
+  )
+  pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
+  pred_rf <- as.integer(pred_rf)
+  
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_gmert, actual = df_test$y)
+  cm_l <- table(predicted = yhat_glmm, actual = df_test$y)
+  cm_logit <- table(predicted = pred_logit, actual = df_test$y)
+  cm_ctree <- table(predicted = pred_ctree, actual = df_test$y)
+  cm_rf <- table(predicted = pred_rf, actual = df_test$y)
+  cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
+  acc_logit <- mean(pred_logit == df_test$y)
+  acc_ctree <- mean(pred_ctree == df_test$y)
+  acc_rf <- mean(pred_rf == df_test$y)
+  acc_gmerf <- mean(yhat_gmerf == df_test$y)
+
+  # F1 score (magiority class)
+  f1_mag_g <- f1_fun(cm_g, magiority = TRUE)
+  f1_mag_l <- f1_fun(cm_l, magiority = TRUE)
+  f1_mag_logit <- f1_fun(cm_logit, magiority = TRUE)
+  f1_mag_ctree <- f1_fun(cm_ctree, magiority = TRUE)
+  f1_mag_rf <- f1_fun(cm_rf, magiority = TRUE)
+  f1_mag_gmerf <- f1_fun(cm_gmerf, magiority = TRUE)
+  
+  #F1 score (minority class)
+  f1_min_g <- f1_fun(cm_g, magiority = FALSE)
+  f1_min_l <- f1_fun(cm_l, magiority = FALSE)
+  f1_min_logit <- f1_fun(cm_logit, magiority = FALSE)
+  f1_min_ctree <- f1_fun(cm_ctree, magiority = FALSE)
+  f1_min_rf <- f1_fun(cm_rf, magiority = FALSE)
+  f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
+  
+  #Bias
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
+  bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
+  bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
+  bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
+  bias_gmerf <- sum(yhat_gmerf)/sum(df_test$y) - 1
+  
+  
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    gmerf_fit = fit_gmerf_k,
+    glmm_fit  = fit_glmm_k,
+    logit_fit = logit_fit_k,
+    ctree_fit = ctree_fit_k,
+    rf_fit    = rf_fit_k,
+    metrics = list(
+      acc_gmert = acc_g, f1_mag_gmert = f1_mag_g,
+      f1_min_gmert = f1_min_g, bias_gmert = bias_g,
+      acc_glmm  = acc_l,  f1_mag_glmm = f1_mag_l,
+      f1_min_glmm = f1_min_l, bias_glmm = bias_l,
+      acc_logit = acc_logit, f1_mag_logit = f1_mag_logit,
+      f1_min_logit = f1_min_logit, bias_logit = bias_logit,
+      acc_ctree = acc_ctree, f1_mag_ctree = f1_mag_ctree,
+      f1_min_ctree = f1_min_ctree, bias_ctree = bias_ctree,
+      acc_rf    = acc_rf,    f1_mag_rf    = f1_mag_rf,
+      f1_min_rf    = f1_min_rf, bias_rf = bias_rf,
+      acc_gmerf = acc_gmerf, f1_mag_gmerf = f1_mag_gmerf,
+      f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
+    ),
+    confusion = list(
+      gmert = cm_g,
+      gmerf = cm_gmerf,
+      glmm  = cm_l,
+      logit = cm_logit,
+      ctree = cm_ctree,
+      rf    = cm_rf
+    ), 
+    df_train = df_train,
+    df_test = df_test
+  )
+})
+
+# ---  Aggregate metrics across folds -------------------------------------------
+metrics_df_par4 <- do.call(rbind, lapply(cv_results_par4, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_mag_gmert  = x$metrics$f1_mag_gmert,
+    f1_min_gmert = x$metrics$f1_min_gmert,
+    bias_gmert = x$metrics$bias_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_mag_glmm = x$metrics$f1_mag_glmm,
+    f1_min_glmm = x$metrics$f1_min_glmm,
+    bias_glmm = x$metrics$bias_glmm,
+    acc_logit = x$metrics$acc_logit,
+    f1_mag_logit = x$metrics$f1_mag_logit,
+    f1_min_logit = x$metrics$f1_min_logit,
+    bias_logit = x$metrics$bias_logit,
+    acc_ctree = x$metrics$acc_ctree,
+    f1_mag_ctree = x$metrics$f1_mag_ctree,
+    f1_min_ctree = x$metrics$f1_min_ctree,
+    bias_ctree = x$metrics$bias_ctree,
+    acc_rf    = x$metrics$acc_rf,
+    f1_mag_rf = x$metrics$f1_mag_rf,
+    f1_min_rf = x$metrics$f1_min_rf,
+    bias_rf = x$metrics$bias_rf,
+    acc_gmerf = x$metrics$acc_gmerf,
+    f1_mag_gmerf = x$metrics$f1_mag_gmerf,
+    f1_min_gmerf = x$metrics$f1_min_gmerf,
+    bias_gmerf = x$metrics$bias_gmerf)
+}))
+
+metrics_df_par <- metrics_df_par4
+cv_summary_par4 <- data.frame(
+  model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
+)
+
+
+# ---------------------------------------------------------------
+# Per-fold summary table from cv_results
+# ---------------------------------------------------------------
+
+fold_table_par4 <- do.call(rbind, lapply(cv_results_par4, function(x) {
+  # guard in case converged_in is missing/NULL
+  inner_vec <- x$gmert_fit$converged_in
+  inner_pct <- if (length(inner_vec)) mean(inner_vec) * 100 else NA_real_
+
+  data.frame(
+    Fold              = x$fold_id,
+    Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
+    Inner_Conv_Percent= round(inner_pct, 1),
+    F1_GMERT          = round(x$metrics$f1_mag_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_mag_glmm, 4),
+    logit_F1         = round(x$metrics$f1_mag_logit, 4),
+    CART_F1          = round(x$metrics$f1_mag_ctree, 4),
+    check.names = FALSE
+  )
+}))
+
+# sort by fold, just in case
+fold_table <- fold_table_par4[order(fold_table_par4$Fold), ]
+
+# pretty print
+knitr::kable(
+  fold_table,
+  align = c("c","c","r","r","r"),
+  rounding = 4,
+  caption = "Per-fold convergence status and F1 scores (GMERT, GLMM, Logit, CART, RF, GMERF)"
+)
+
+cv_summary_par4
+
+```
+
+
+```{r}
+# ---------------------------------------------------------------
+# sim_data_gmert: simulate clustered binary data for GMERT models
+
+sim_data_general <- function(G = 50, p = 10, seed = 123,
+                             beta_mean = 0, beta_sd = 1,
+                             sigma_b0 = 0.8, sigma_b = 0.5, rho = 0.2) {
+  set.seed(seed)
+
+  n_i <- 10 * p                # 10 observations per feature per cluster
+  N   <- G * n_i
+  n_re <- max(1, floor(p / 10))  # random slopes (1 in 10)
+
+  # --- Covariance matrix for random effects (1 intercept + n_re slopes)
+  # size = (n_re + 1) × (n_re + 1)
+  D <- diag(c(sigma_b0^2, rep(sigma_b^2, n_re)))
+  # introduce correlation (rho) between random intercept and slopes
+  D[1, 2:(n_re + 1)] <- rho * sigma_b0 * sigma_b
+  D[2:(n_re + 1), 1] <- rho * sigma_b0 * sigma_b
+
+  # --- Random effects for G clusters: (b0_i, b1_i, ..., bn_re_i)
+  b_mat <- MASS::mvrnorm(G, mu = rep(0, n_re + 1), Sigma = D)
+
+  # --- Cluster IDs
+  id <- rep(1:G, each = n_i)
+
+  # --- Generate covariates (normal, independent)
+  X <- matrix(rnorm(N * p), nrow = N, ncol = p)
+  colnames(X) <- paste0("x", 1:p)
+
+  # --- Fixed effects coefficients
+  beta <- rnorm(p, mean = beta_mean, sd = beta_sd)
+
+  # --- Random effects design (subset of X)
+  Z <- X[, 1:n_re, drop = FALSE]
+
+  # --- Linear predictor: fixed effects + random intercept + random slopes
+  eta <- numeric(N)
+  for (g in seq_len(G)) {
+    idx <- which(id == g)
+    b0_g <- b_mat[g, 1]                    # random intercept
+    b_slopes_g <- b_mat[g, -1]             # random slopes
+    eta[idx] <- 0.5 + X[idx, ] %*% beta +
+                b0_g + Z[idx, , drop = FALSE] %*% b_slopes_g
+  }
+
+  # --- Generate outcome (binary logistic)
+  p_vec <- 1 / (1 + exp(-eta))
+  y <- rbinom(N, 1, p_vec)
+
+  # --- Return data
+  data.frame(id = factor(id), y = y, X)
+}
+
+# ================================================================
+run_full_cv <- function(df, K = 10, seed = 42, p) {
+
+set.seed(seed )  
+  
+folds <- vector("list", K); for (k in seq_len(K)) folds[[k]] <- integer(0)
+
+for (g in unique(df$id)) {
+  idx_g <- which(df$id == g)
+  idx_g <- sample(idx_g)                                # shuffle within cluster
+  split_g <- split(idx_g, cut(seq_along(idx_g), K, labels = FALSE))
+  for (k in seq_len(K)) folds[[k]] <- c(folds[[k]], split_g[[k]])
+}  
+  
+n_re <- max(1, floor(p / 10))               # number of random slopes
+re_vars <- paste0("x", 1:n_re)              # random-effect features
+
+fixed_part  <- paste(paste0("x", 1:p), collapse = " + ")
+random_part <- paste0("(1 + ", paste(re_vars, collapse = " + "), " | id)")
+form <- as.formula(paste("y ~", fixed_part, "+", random_part))  
+  
+# pick number of workers (leave one core free when possible)
+n_workers <- max(1L, min(K, detectCores() - 1L))
+cl <- makeCluster(n_workers, type = "PSOCK")
+
+# make RNG reproducible across workers
+clusterSetRNGStream(cl, iseed = 42)
+
+# load packages and export needed objects/functions to workers
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterExport(
+  cl,
+  varlist = c("df", "folds", "re_vars", "form","fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+                "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
+              "fit_gmerf_small","predict_gmerf"),
+  envir = environment()
+)
+
+# --- Run folds in parallel -----------------------------------------------------
+cv_results_par <- parLapply(cl, seq_len(K), function(k) {
+  # define train/test indices
+  test_idx  <- folds[[k]]
+  train_idx <- setdiff(seq_len(nrow(df)), test_idx)
+  df_train  <- df[train_idx, ]
+  df_test   <- df[test_idx, ]
+
+  # GMERT: fit and predict
+  fit_gmert_k <- fit_gmert_small(df_train, random_effects = re_vars,
+                                 max_iter_out = 5, tol = 1e-4)
+  yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
+
+  # GLMM: fit and predict (same random-effects structure)
+  fit_glmm_k <- glmer(
+    form,
+    data = df_train,
+    family = binomial(link = "logit"),
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  p_glmm     <- as.numeric(predict(fit_glmm_k, newdata = df_test, type = "response"))
+  yhat_glmm  <- as.integer(p_glmm >= 0.5)
+  
+  #GEMERF: fit and predict
+  fit_gmerf_k <- fit_gmerf_small(df_train, random_effects = re_vars,
+                                 max_iter_out = 5, tol = 1e-4)
+  yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
+
+  # Logit regression: fit and predict
+  logit_fit_k <- glm(form, data = df_train, family = binomial())
+  p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
+  pred_logit  <- as.integer(p_logit >= 0.5)
+  
+  # Classification tree: fit and predict
+  df_train_ct <- df_train; df_train_ct$y <- factor(df_train_ct$y, levels = c(0,1))
+  df_test_ct  <- df_test;  df_test_ct$y  <- factor(df_test_ct$y,  levels = c(0,1))
+  ctree_fit_k <- rpart::rpart(
+    y ~ x1 + x2 + x3,
+    data = df_train_ct,
+    method = "class",
+    control = rpart::rpart.control(cp = 0.0, minsplit = 20, minbucket = 7, maxdepth = 5)
+  )
+  pred_ct_class_k <- predict(ctree_fit_k, newdata = df_test_ct, type = "class") # factor("0"/"1")
+  pred_ctree <- as.integer(as.character(pred_ct_class_k))
+  
+  # Random Forest: fit and predict
+  rf_fit_k <- ranger::ranger(
+    formula = y ~ x1 + x2 + x3,
+    data = df_train,
+    num.trees = 500,
+    mtry = 2,
+    min.node.size = 5,
+    classification = TRUE,
+    probability = FALSE,
+    seed = 42
+  )
+  pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
+  pred_rf <- as.integer(pred_rf)
+  
+  # ----- (c) Metrics on the test portion of this fold
+  # Confusion matrices
+  cm_g <- table(predicted = yhat_gmert, actual = df_test$y)
+  cm_l <- table(predicted = yhat_glmm, actual = df_test$y)
+  cm_logit <- table(predicted = pred_logit, actual = df_test$y)
+  cm_ctree <- table(predicted = pred_ctree, actual = df_test$y)
+  cm_rf <- table(predicted = pred_rf, actual = df_test$y)
+  cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
+
+  # Accuracy
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
+  acc_logit <- mean(pred_logit == df_test$y)
+  acc_ctree <- mean(pred_ctree == df_test$y)
+  acc_rf <- mean(pred_rf == df_test$y)
+  acc_gmerf <- mean(yhat_gmerf == df_test$y)
+
+  # F1 score (magiority class)
+  f1_mag_g <- f1_fun(cm_g, magiority = TRUE)
+  f1_mag_l <- f1_fun(cm_l, magiority = TRUE)
+  f1_mag_logit <- f1_fun(cm_logit, magiority = TRUE)
+  f1_mag_ctree <- f1_fun(cm_ctree, magiority = TRUE)
+  f1_mag_rf <- f1_fun(cm_rf, magiority = TRUE)
+  f1_mag_gmerf <- f1_fun(cm_gmerf, magiority = TRUE)
+  
+  #F1 score (minority class)
+  f1_min_g <- f1_fun(cm_g, magiority = FALSE)
+  f1_min_l <- f1_fun(cm_l, magiority = FALSE)
+  f1_min_logit <- f1_fun(cm_logit, magiority = FALSE)
+  f1_min_ctree <- f1_fun(cm_ctree, magiority = FALSE)
+  f1_min_rf <- f1_fun(cm_rf, magiority = FALSE)
+  f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
+  
+  #Bias
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
+  bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
+  bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
+  bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
+  bias_gmerf <- sum(yhat_gmerf)/sum(df_test$y) - 1
+  
+  
+  # return full fold bundle
+  list(
+    fold_id   = k,
+    train_idx = train_idx,
+    test_idx  = test_idx,
+    gmert_fit = fit_gmert_k,
+    gmerf_fit = fit_gmerf_k,
+    glmm_fit  = fit_glmm_k,
+    logit_fit = logit_fit_k,
+    ctree_fit = ctree_fit_k,
+    rf_fit    = rf_fit_k,
+    metrics = list(
+      acc_gmert = acc_g, f1_mag_gmert = f1_mag_g,
+      f1_min_gmert = f1_min_g, bias_gmert = bias_g,
+      acc_glmm  = acc_l,  f1_mag_glmm = f1_mag_l,
+      f1_min_glmm = f1_min_l, bias_glmm = bias_l,
+      acc_logit = acc_logit, f1_mag_logit = f1_mag_logit,
+      f1_min_logit = f1_min_logit, bias_logit = bias_logit,
+      acc_ctree = acc_ctree, f1_mag_ctree = f1_mag_ctree,
+      f1_min_ctree = f1_min_ctree, bias_ctree = bias_ctree,
+      acc_rf    = acc_rf,    f1_mag_rf    = f1_mag_rf,
+      f1_min_rf    = f1_min_rf, bias_rf = bias_rf,
+      acc_gmerf = acc_gmerf, f1_mag_gmerf = f1_mag_gmerf,
+      f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
+    ),
+    confusion = list(
+      gmert = cm_g,
+      gmerf = cm_gmerf,
+      glmm  = cm_l,
+      logit = cm_logit,
+      ctree = cm_ctree,
+      rf    = cm_rf
+    ), 
+    df_train = df_train,
+    df_test = df_test
+  )
+})
+
+return(cv_results_par)
+}
+
+
+
+# --- 1) Build K cluster-aware folds ----------------------------------------------
+
+summary_list <- list()
+results_list <- list()
+
+for (p in seq(10,200,by=10)) {
+  df_sim <- sim_data_general(G = 50, p = p, seed = 123)
+  cv_results_par <- run_full_cv(df_sim, K = 10, seed = 42, p = p)
+  metrics_df_par <- do.call(rbind, lapply(cv_results_par, function(x) {
+  data.frame(
+    fold = x$fold_id,
+    acc_gmert = x$metrics$acc_gmert,
+    f1_mag_gmert  = x$metrics$f1_mag_gmert,
+    f1_min_gmert = x$metrics$f1_min_gmert,
+    bias_gmert = x$metrics$bias_gmert,
+    acc_glmm  = x$metrics$acc_glmm,
+    f1_mag_glmm = x$metrics$f1_mag_glmm,
+    f1_min_glmm = x$metrics$f1_min_glmm,
+    bias_glmm = x$metrics$bias_glmm,
+    acc_logit = x$metrics$acc_logit,
+    f1_mag_logit = x$metrics$f1_mag_logit,
+    f1_min_logit = x$metrics$f1_min_logit,
+    bias_logit = x$metrics$bias_logit,
+    acc_ctree = x$metrics$acc_ctree,
+    f1_mag_ctree = x$metrics$f1_mag_ctree,
+    f1_min_ctree = x$metrics$f1_min_ctree,
+    bias_ctree = x$metrics$bias_ctree,
+    acc_rf    = x$metrics$acc_rf,
+    f1_mag_rf = x$metrics$f1_mag_rf,
+    f1_min_rf = x$metrics$f1_min_rf,
+    bias_rf = x$metrics$bias_rf,
+    acc_gmerf = x$metrics$acc_gmerf,
+    f1_mag_gmerf = x$metrics$f1_mag_gmerf,
+    f1_min_gmerf = x$metrics$f1_min_gmerf,
+    bias_gmerf = x$metrics$bias_gmerf
+  )
+}))
+
+cv_summary_par <- data.frame(
+  model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
+)
+summary_list[[as.character(p)]] <- cv_summary_par
+results_list[[as.character(p)]] <- cv_results_par
+}
+
+
+
+```
+
+
+
+
+
+
+

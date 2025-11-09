@@ -94,14 +94,14 @@ No train/test split is used here: the goal is to illustrate the fitting procedur
 ```{r}
 # ---------------------------------------------------------------
 # EXAMPLE RUN
-# ---------------------------------------------------------------
+# --------------------------------------------------------------- 
 
 #  Simulate clustered binary data (30 clusters, 60 observations each)
 df <- sim_data_gmert(G = 30, n_i = 60)
 
 #  Fit the GMERT model using the full dataset
-fit <- fit_gmert_small(df, max_iter_inn = 10, 
-                 max_iter_out = 10, tol = 1e-6)
+fit <- fit_gmerf_small(df, max_iter_inn = 1000, 
+                 max_iter_out = 100, tol = 1e-4)
 
 #  Check convergence and model components
 fit$converged_out       # whether the outer (PQL) loop converged
@@ -174,8 +174,8 @@ bias_gmert
 # GLMM
 cm_glmm <- table(predicted = y_hat_glmm, actual = df$y)
 acc_glmm <- mean(y_hat_glmm == df$y)
-f1_mag_glmm  <- f1_fun(cm_gmert, magiority = TRUE)
-f1_min_glmm  <- f1_fun(cm_gmert, magiority = FALSE)
+f1_mag_glmm  <- f1_fun(cm_glmm, magiority = TRUE)
+f1_min_glmm  <- f1_fun(cm_glmm, magiority = FALSE)
 bias_glmm <- sum(y_hat_glmm)/sum(df$y) - 1
 
 # confusion matrix for GLMM
@@ -620,7 +620,7 @@ clusterSetRNGStream(cl, iseed = 42)
 clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
 clusterExport(
   cl,
-  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ainv_fun",
+  varlist = c("df", "folds", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
                 "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
               "fit_gmerf_small","predict_gmerf"),
   envir = environment()
@@ -635,7 +635,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   df_test   <- df[test_idx, ]
 
   # GMERT: fit and predict
-  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 100, tol = 1e-4)
   yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
 
   # GLMM: fit and predict (same random-effects structure)
@@ -649,7 +649,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   yhat_glmm  <- as.integer(p_glmm >= 0.5)
   
   #GEMERF: fit and predict
-  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 100, tol = 1e-4)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
@@ -693,8 +693,8 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   cm_gmerf <- table(predicted = yhat_gmerf, actual = df_test$y)
 
   # Accuracy
-  acc_g <- mean(yhat_g == df_test$y)
-  acc_l <- mean(yhat_l == df_test$y)
+  acc_g <- mean(yhat_gmert == df_test$y)
+  acc_l <- mean(yhat_glmm == df_test$y)
   acc_logit <- mean(pred_logit == df_test$y)
   acc_ctree <- mean(pred_ctree == df_test$y)
   acc_rf <- mean(pred_rf == df_test$y)
@@ -717,8 +717,8 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   f1_min_gmerf <- f1_fun(cm_gmerf, magiority = FALSE)
   
   #Bias
-  bias_g <- sum(yhat_g)/sum(df_test$y) - 1
-  bias_l <- sum(yhat_l)/sum(df_test$y) - 1
+  bias_g <- sum(yhat_gmert)/sum(df_test$y) - 1
+  bias_l <- sum(yhat_glmm)/sum(df_test$y) - 1
   bias_logit <- sum(pred_logit)/sum(df_test$y) - 1
   bias_ctree <- sum(pred_ctree)/sum(df_test$y) - 1
   bias_rf <- sum(pred_rf)/sum(df_test$y) - 1
@@ -751,9 +751,9 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
       f1_min_gmerf = f1_min_gmerf, bias_gmerf = bias_gmerf
     ),
     confusion = list(
-      gmert = cm_gmert,
+      gmert = cm_g,
       gmerf = cm_gmerf,
-      glmm  = cm_glmm,
+      glmm  = cm_l,
       logit = cm_logit,
       ctree = cm_ctree,
       rf    = cm_rf
@@ -788,49 +788,36 @@ metrics_df_par <- do.call(rbind, lapply(cv_results_par, function(x) {
     acc_gmerf = x$metrics$acc_gmerf,
     f1_mag_gmerf = x$metrics$f1_mag_gmerf,
     f1_min_gmerf = x$metrics$f1_min_gmerf,
-    bias_gmerf = x$metrics$bias_gmerf,
-    fold      = x$fold_id,
-    acc_gmert = x$metrics$acc_gmert,
-    f1_gmert  = x$metrics$f1_gmert,
-    acc_gmerf = x$metrics$acc_gmerf,
-    f1_gmerf  = x$metrics$f1_gmerf,
-    acc_glmm  = x$metrics$acc_glmm,
-    f1_glmm   = x$metrics$f1_glmm,
-    acc_logit = x$metrics$acc_logit,
-    f1_logit  = x$metrics$f1_logit,
-    acc_ctree = x$metrics$acc_ctree,
-    f1_ctree  = x$metrics$f1_ctree,
-    acc_rf    = x$metrics$acc_rf,
-    f1_rf     = x$metrics$f1_rf
+    bias_gmerf = x$metrics$bias_gmerf
   )
 }))
 
 cv_summary_par <- data.frame(
   model   = c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF"),
-  acc_mean = c(mean(metrics_df$acc_gmert), mean(metrics_df$acc_glmm),
-               mean(metrics_df$acc_logit), mean(metrics_df$acc_ctree),
-               mean(metrics_df$acc_rf),    mean(metrics_df$acc_gmerf)),
-  acc_sd   = c(sd(metrics_df$acc_gmert),   sd(metrics_df$acc_glmm), 
-               sd(metrics_df$acc_logit),   sd(metrics_df$acc_ctree),
-               sd(metrics_df$acc_rf),      sd(metrics_df$acc_gmerf)),
-  f1_mag_mean  = c(mean(metrics_df$f1_mag_gmert),  mean(metrics_df$f1_mag_glmm),
-               mean(metrics_df$f1_mag_logit),  mean(metrics_df$f1_mag_ctree),
-               mean(metrics_df$f1_mag_rf),     mean(metrics_df$f1_mag_gmerf)),
-  f1_mag_sd    = c(sd(metrics_df$f1_mag_gmert),    sd(metrics_df$f1_mag_glmm),
-               sd(metrics_df$f1_mag_logit),    sd(metrics_df$f1_mag_ctree),
-               sd(metrics_df$f1_mag_rf),       sd(metrics_df$f1_mag_gmerf)),
-  f1_min_mean  = c(mean(metrics_df$f1_min_gmert),  mean(metrics_df$f1_min_glmm),
-               mean(metrics_df$f1_min_logit),  mean(metrics_df$f1_min_ctree),
-               mean(metrics_df$f1_min_rf),     mean(metrics_df$f1_min_gmerf)),
-  f1_min_sd    = c(sd(metrics_df$f1_min_gmert),    sd(metrics_df$f1_min_glmm),
-               sd(metrics_df$f1_min_logit),    sd(metrics_df$f1_min_ctree),
-               sd(metrics_df$f1_min_rf),       sd(metrics_df$f1_min_gmerf)),
-  bias_mean = c(mean(metrics_df$bias_gmert), mean(metrics_df$bias_glmm),
-               mean(metrics_df$bias_logit), mean(metrics_df$bias_ctree),
-               mean(metrics_df$bias_rf),    mean(metrics_df$bias_gmerf)),
-  bias_sd   = c(sd(metrics_df$bias_gmert),   sd(metrics_df$bias_glmm), 
-               sd(metrics_df$bias_logit),   sd(metrics_df$bias_ctree),
-               sd(metrics_df$bias_rf),      sd(metrics_df$bias_gmerf))
+  acc_mean = c(mean(metrics_df_par$acc_gmert), mean(metrics_df_par$acc_glmm),
+               mean(metrics_df_par$acc_logit), mean(metrics_df_par$acc_ctree),
+               mean(metrics_df_par$acc_rf),    mean(metrics_df_par$acc_gmerf)),
+  acc_sd   = c(sd(metrics_df_par$acc_gmert),   sd(metrics_df_par$acc_glmm), 
+               sd(metrics_df_par$acc_logit),   sd(metrics_df_par$acc_ctree),
+               sd(metrics_df_par$acc_rf),      sd(metrics_df_par$acc_gmerf)),
+  f1_mag_mean  = c(mean(metrics_df_par$f1_mag_gmert),  mean(metrics_df_par$f1_mag_glmm),
+               mean(metrics_df_par$f1_mag_logit),  mean(metrics_df_par$f1_mag_ctree),
+               mean(metrics_df_par$f1_mag_rf),     mean(metrics_df_par$f1_mag_gmerf)),
+  f1_mag_sd    = c(sd(metrics_df_par$f1_mag_gmert),    sd(metrics_df_par$f1_mag_glmm),
+               sd(metrics_df_par$f1_mag_logit),    sd(metrics_df_par$f1_mag_ctree),
+               sd(metrics_df_par$f1_mag_rf),       sd(metrics_df_par$f1_mag_gmerf)),
+  f1_min_mean  = c(mean(metrics_df_par$f1_min_gmert),  mean(metrics_df_par$f1_min_glmm),
+               mean(metrics_df_par$f1_min_logit),  mean(metrics_df_par$f1_min_ctree),
+               mean(metrics_df_par$f1_min_rf),     mean(metrics_df_par$f1_min_gmerf)),
+  f1_min_sd    = c(sd(metrics_df_par$f1_min_gmert),    sd(metrics_df_par$f1_min_glmm),
+               sd(metrics_df_par$f1_min_logit),    sd(metrics_df_par$f1_min_ctree),
+               sd(metrics_df_par$f1_min_rf),       sd(metrics_df_par$f1_min_gmerf)),
+  bias_mean = c(mean(metrics_df_par$bias_gmert), mean(metrics_df_par$bias_glmm),
+               mean(metrics_df_par$bias_logit), mean(metrics_df_par$bias_ctree),
+               mean(metrics_df_par$bias_rf),    mean(metrics_df_par$bias_gmerf)),
+  bias_sd   = c(sd(metrics_df_par$bias_gmert),   sd(metrics_df_par$bias_glmm), 
+               sd(metrics_df_par$bias_logit),   sd(metrics_df_par$bias_ctree),
+               sd(metrics_df_par$bias_rf),      sd(metrics_df_par$bias_gmerf))
 )
 
 ```
@@ -850,10 +837,10 @@ fold_table_par <- do.call(rbind, lapply(cv_results_par, function(x) {
     Fold              = x$fold_id,
     Outer_Converged   = isTRUE(x$gmert_fit$converged_out),
     Inner_Conv_Percent= round(inner_pct, 1),
-    F1_GMERT          = round(x$metrics$f1_gmert, 4),
-    F1_GLMM           = round(x$metrics$f1_glmm, 4),
-    logit_F1         = round(x$metrics$f1_logit, 4),
-    CART_F1          = round(x$metrics$f1_ctree, 4),
+    F1_GMERT          = round(x$metrics$f1_mag_gmert, 4),
+    F1_GLMM           = round(x$metrics$f1_mag_glmm, 4),
+    logit_F1         = round(x$metrics$f1_mag_logit, 4),
+    CART_F1          = round(x$metrics$f1_mag_ctree, 4),
     check.names = FALSE
   )
 }))

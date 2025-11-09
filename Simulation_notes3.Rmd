@@ -1,5 +1,5 @@
 ---
-title: "Simulation notes clustered binary data second setup"
+title: "Simulation notes clustered binary data third setup"
 author: "Paolo Colussi"
 date: "`r Sys.Date()`"
 output: pdf_document
@@ -30,7 +30,7 @@ This setup provides a realistic test bed for evaluating mixed-effects tree algor
 # ---------------------------------------------------------------
 # sim_data_gmert: simulate clustered binary data for GMERT models
 # ---------------------------------------------------------------
-sim_data2 <- function(G = 50,          # number of clusters
+sim_data3 <- function(G = 50,          # number of clusters
                            n_i = 40,        # observations per cluster
                            beta0 = 0.5,     # fixed intercept
                            beta1 = 1.2,     # fixed effect for x1
@@ -57,12 +57,13 @@ sim_data2 <- function(G = 50,          # number of clusters
   x1 <- runif(G * n_i, -2, 2)
   x2 <- rnorm(G * n_i, 5, 1)
   x3 <- rbinom(G * n_i, 1, 0.5)
+  x4 <- rbinom(G * n_i, 1, 0.5)
 
   # linear predictor: fixed part + random part (b0_i + b1_i * x1)
   eta <- numeric(G * n_i)
   for (g in seq_len(G)) {
     idx <- which(id == g)
-    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * log(x2[idx]) + beta3 * x3[idx] +
+    eta[idx] <- beta0 + beta1 * x1[idx] + beta2 * x2[idx]*x4[idx] + beta3 * x3[idx] +
                 b[g, 1] + b[g, 2] * x1[idx]
   }
 
@@ -78,7 +79,8 @@ sim_data2 <- function(G = 50,          # number of clusters
     y = y,
     x1 = x1,
     x2 = x2,
-    x3 = x3
+    x3 = x3,
+    x4 = x4
   )
 }
 
@@ -97,11 +99,11 @@ No train/test split is used here: the goal is to illustrate the fitting procedur
 # ---------------------------------------------------------------
 
 #  Simulate clustered binary data (30 clusters, 60 observations each)
-df <- sim_data2(G = 30, n_i = 60)
+df <- sim_data3(G = 30, n_i = 60)
 
 #  Fit the GMERT model using the full dataset
-fit <- fit_gmerf_small(df, max_iter_inn = 10, 
-                 max_iter_out = 10, tol = 1e-6)
+fit <- fit_gmert_small(df, max_iter_inn = 10, 
+                 max_iter_out = 10, tol = 1e-4)
 
 #  Check convergence and model components
 fit$converged_out       # whether the outer (PQL) loop converged
@@ -116,14 +118,26 @@ fit$sigma2              # estimated residual variance
 
 ```{r}
 #    GLMM baseline with the same random-effects structure
-#    (logistic link; random intercept + random slope on x1 by cluster id)
-glmm_fit <- glmer(
-  y ~ x1 + x2 + x3 + (1 + x1 | id),
+#    (logistic link; random intercept + random slope on x1 by cluster id) 
+#    all supposed fixed effects included
+glmm_fit_allvar <- glmer(
+  y ~ x1 + x2 + x3 + x4 + (1 + x1 | id),
   data = df,
   family = binomial(link = "logit")
 )
 
-summary(glmm_fit)  # fixed effects, random effects, VarCorr, etc.
+summary(glmm_fit_allvar)  # fixed effects, random effects, VarCorr, etc.
+
+#    GLMM baseline with the same random-effects structure
+#    (logistic link; random intercept + random slope on x1 by cluster id)
+#    interaction between x2 and x4 included
+glmm_fit_int <- glmer(
+  y ~ x1 + x2*x4 + x3 + (1 + x1 | id),
+  data = df,
+  family = binomial(link = "logit")
+)
+
+summary(glmm_fit_int)  # fixed effects, random effects, VarCorr, etc.
 
 ```
 
@@ -133,11 +147,15 @@ Both models share the same random-effects structure, so differences in performan
 ```{r}
 # Predictions (binary) for both models on the same data
 # GMERT: predict_mert_RIC returns 0/1 (no unseen clusters here)
-y_hat_gmert <- predict_gmerf(fit, df)
+y_hat_gmert <- predict_gmert(fit, df)
 
-# GLMM: predict probabilities then threshold to 0/1
-p_glmm      <- as.numeric(predict(glmm_fit, type = "response"))
-y_hat_glmm  <- as.integer(p_glmm >= 0.5)
+# GLMM with all variables: predict probabilities then threshold to 0/1
+p_glmm_allvar      <- as.numeric(predict(glmm_fit_allvar, type = "response"))
+y_hat_glmm_allvar  <- as.integer(p_glmm_allvar >= 0.5)
+
+# GLM with interaction: predict probabilities then threshold to 0/1
+p_glmm_int      <- as.numeric(predict(glmm_fit_int, type = "response"))
+y_hat_glmm_int  <- as.integer(p_glmm_int >= 0.5)
 
 # Confusion matrices and metrics
 
@@ -171,21 +189,37 @@ f1_mag_gmert
 f1_min_gmert
 bias_gmert
 
-# GLMM
-cm_glmm <- table(predicted = y_hat_glmm, actual = df$y)
-acc_glmm <- mean(y_hat_glmm == df$y)
-f1_mag_glmm  <- f1_fun(cm_glmm, magiority = TRUE)
-f1_min_glmm  <- f1_fun(cm_glmm, magiority = FALSE)
-bias_glmm <- sum(y_hat_glmm)/sum(df$y) - 1
+# GLMM (all variables)
+cm_glmm_allvar <- table(predicted = y_hat_glmm_allvar, actual = df$y)
+acc_glmm_allvar <- mean(y_hat_glmm_allvar == df$y)
+f1_mag_glmm_allvar  <- f1_fun(cm_glmm_allvar, magiority = TRUE)
+f1_min_glmm_allvar  <- f1_fun(cm_glmm_allvar, magiority = FALSE)
+bias_glmm_allvar <- sum(y_hat_glmm_allvar)/sum(df$y) - 1
 
 # confusion matrix for GLMM
-cm_glmm
+cm_glmm_allvar
 
 # accuracy and F1 for GLMM
-acc_glmm
-f1_mag_glmm
-f1_min_glmm
-bias_glmm
+acc_glmm_allvar
+f1_mag_glmm_allvar
+f1_min_glmm_allvar
+bias_glmm_allvar
+
+# GLMM (with interaction)
+cm_glmm_int <- table(predicted = y_hat_glmm_int, actual = df$y)
+acc_glmm_int <- mean(y_hat_glmm_int == df$y)
+f1_mag_glmm_int  <- f1_fun(cm_glmm_int, magiority = TRUE)
+f1_min_glmm_int  <- f1_fun(cm_glmm_int, magiority = FALSE)
+bias_glmm_int <- sum(y_hat_glmm_int)/sum(df$y) - 1
+
+# confusion matrix for GLMM
+cm_glmm_int
+
+# accuracy and F1 for GLMM
+acc_glmm_int
+f1_mag_glmm_int
+f1_min_glmm_int
+bias_glmm_int
 ```
 
 **Confusion matrices** summarize the counts of TP/FP/FN/TN for each model.  
@@ -589,7 +623,7 @@ Now, we do basically the same thing but in parallel
 set.seed(42 )
 
 # --- 0) Simulate one dataset ------------------------------------------------------
-df <- sim_data2(G = 30, n_i = 60) 
+df <- sim_data3(G = 30, n_i = 60) 
 performance::icc(
   glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df, family = binomial())
 )  # check clustering strength
@@ -640,7 +674,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
 
   # GLMM: fit and predict (same random-effects structure)
   fit_glmm_k <- glmer(
-    y ~ x1 + x2 + x3 + (1 + x1 | id),
+    y ~ x1 + x2 + x3 + x4 + (1 + x1 | id),
     data = df_train,
     family = binomial(link = "logit"),
     control = glmerControl(optimizer = "bobyqa")
@@ -653,7 +687,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
-  logit_fit_k <- glm(y ~ x1 + x2 + x3, data = df_train, family = binomial())
+  logit_fit_k <- glm(y ~ x1 + x2 + x3 + x4, data = df_train, family = binomial())
   p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
   pred_logit  <- as.integer(p_logit >= 0.5)
   

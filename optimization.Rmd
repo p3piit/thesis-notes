@@ -483,7 +483,8 @@ fit_gmert_small    <- function(df,               # df: data.frame with columns
   eta_old <- rep(0, N)                          # previous eta for outer-loop convergence check
   converged_in <- c()                           # inner-loop convergence flags (per outer iteration)
   converged_out <- FALSE                        # outer-loop convergence flag
-
+  time_start <- proc.time()                     # start timer
+  
   # --- Outer loop (PQL updates) ---
   repeat {
     m = 0                                       # reset inner-loop counter
