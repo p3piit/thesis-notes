@@ -172,7 +172,7 @@ ait_stop <- function(gll,  #gll : numeric vector with GLL history (needs last th
 
 fit_gmert    <- function(df,               # df: data.frame with columns
                          id = "id",      # cluster identifier column name
-                         y = "y",        # response column name
+                         target = "y",        # response column name
                          random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                          max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                          max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
@@ -189,7 +189,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
   G <- length(unique(df[[id]]))                    # number of clusters
   idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
   
-  y <- df[[y]]                                     # response vector
+  y <- df[[target]]                                     # response vector
   Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
   
@@ -225,7 +225,7 @@ fit_gmert    <- function(df,               # df: data.frame with columns
       # (1.ii) M-step: fit regression tree for fixed effects f(X)
       ctrl <- rpart.control(cp = cp, minsplit = minsplit, xval = xval,
                             minbucket = minbucket, maxdepth = maxdepth)
-      Xdf <- df[setdiff(names(df), c(id, y))]
+      Xdf <- df[setdiff(names(df), c(id, target))]
       tree <- rpart(y_star ~ .,
                     data = cbind(y_star = y_star, Xdf),
                     weights = w, method = "anova", control = ctrl)
@@ -314,7 +314,7 @@ predict_gmert <- function(fit, new_df, random_effect = "x1", thr = 0.5, id = "id
   # fixed part: regression tree predictions using predictors only
   fhat <- as.numeric(predict(fit$tree, new_df))        # tree fitted on y*; use on new data
   # construct random effects design for new data: [1, x1]
-  Znew <- cbind(1, new_df[[random_effect]])
+  Znew <- cbind(1, new_df[random_effect])
   # container for random effects contributions
   add <- numeric(nrow(new_df))
   # clusters seen during training (so we have estimated b_i)
@@ -434,7 +434,7 @@ split_gmert_data <- function(df, train_prop = 0.7, seed = 123) {
 
 fit_gmerf    <- function(df,               # df: data.frame with columns
                          id = "id",      # cluster identifier column name
-                         y = "y",        # response column name
+                         target = "y",        # response column name
                          random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                          max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                          max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
@@ -451,7 +451,7 @@ fit_gmerf    <- function(df,               # df: data.frame with columns
   G <- length(unique(df[[id]]))                    # number of clusters
   idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
   
-  y <- df[[y]]                                     # response vector
+  y <- df[[target]]                                     # response vector
   Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
   
@@ -485,7 +485,7 @@ fit_gmerf    <- function(df,               # df: data.frame with columns
       y_star <- y_t - zb                        # adjusted response for tree fit
       
       # (1.ii) M-step: fit random forest to (y_tilde*, X, W)
-      Xrf <- df[[setdiff(names(df), c(id, y))]]
+      Xrf <- df[setdiff(names(df), c(id, target))]
       rf <- ranger::ranger(
         formula         = y_star ~ .,
         data            = cbind(y_star = y_star, Xrf),
@@ -586,7 +586,7 @@ predict_gmerf <- function(fit, new_df, thr = 0.5, random_effects = "x1", id = "i
   # fixed part: regression tree predictions using predictors only
   fhat <- as.numeric(predict(fit$forest, data = new_df)$predictions)
   # construct random effects design for new data: [1, x1]
-  Znew <- cbind(1, new_df[[random_effects]])
+  Znew <- cbind(1, new_df[random_effects])
   # container for random effects contributions
   add <- numeric(nrow(new_df))
   # clusters seen during training (so we have estimated b_i)
@@ -616,30 +616,30 @@ predict_gmerf <- function(fit, new_df, thr = 0.5, random_effects = "x1", id = "i
 # From optimization.Rmd
 
 ##############################################################
-# Ainv_fun: precomputes A_i^{-1} (and optionally Z_i^T W_i Z_i) for all clusters
-Ainv_fun <- function(G,        # G      : number of clusters
+# Ajnv_fun: precomputes A_j^{-1} (and optionally Z_j^T W_j Z_j) for all clusters
+Ajnv_fun <- function(G,        # G      : number of clusters
                      Z,        # Z      : N x q random-effects design
                      w,        # W      : list of weigths 
                      D,        # D      : q x q covariance of random effects (current)
                      sigma2,   # sigma2 : residual variance (current)
                      idx      # idx    : list length G with row indices for each cluster
 ){
-  Ainv_list <- vector("list", G)
+  Ajnv_list <- vector("list", G)
   
-  Dinv <- solve(D)                                 # D^{-1} (q x q) once
+  Djnv <- solve(D)                                 # D^{-1} (q x q) once
   
   for (g in seq_len(G)) {
-    Zi  <- Z[idx[[g]], , drop = FALSE]             # n_i x q
-    Wi  <- diag(w[idx[[g]]])                      
-    ZtWZ <- t(Zi) %*% Wi %*% Zi                     # Z_i^T W_i Z_i (q x q)
+    Zj  <- Z[idx[[g]], , drop = FALSE]             # n_j x q
+    Wj  <- diag(w[idx[[g]]])                      
+    ZtWZ <- t(Zj) %*% Wj %*% Zj                     # Z_j^T W_j Z_j (q x q)
     
-    A <- Dinv + as.numeric((1 / sigma2)) * ZtWZ                # A_i
-    Ainv <- solve(A)                              # A_i^{-1} 
+    A <- Djnv + as.numeric((1 / sigma2)) * ZtWZ                # A_j
+    Ajnv <- solve(A)                              # A_j^{-1} 
     
-    Ainv_list[[g]] <- Ainv
+    Ajnv_list[[g]] <- Ajnv
   }
   
-  Ainv_list
+  Ajnv_list
 }
 
 
@@ -721,18 +721,19 @@ D_fun_small <- function(G,        # G      : number of clusters
 
 # Main fitting function using Ainv-based updates
 
-fit_gmerf_small    <- function(df,               # df: data.frame with columns
+
+fit_gmert_small    <- function(df,               # df: data.frame with columns
                                id = "id",      # cluster identifier column name
-                               y = "y",        # response column name
+                               target = "y",        # response column name
                                random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                                max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                                max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
-                               tol = 1e-6,           # convergence tolerance for both loops (Aitken or relative diff)     
-                               ntrees = 500,        # RF: number of trees
-                               mtry   = NULL,       # RF: features tried at each split (default = floor(p/3) if NULL)
-                               min_node_size = 5,   # RF: terminal node size
-                               max.depth = NULL,    # RF: optional max depth (NULL = unlimited)
-                               seed = 1234          # random seed for reproducibility 
+                               tol = 1e-6,           # convergence tolerance for both loops (Aitken or relative diff)
+                               cp = 0.0,             # rpart complexity parameter (pruning threshold)
+                               minsplit = 50,        # minimum number of obs required to attempt a split
+                               minbucket = 20,       # minimum number of obs in any terminal node
+                               maxdepth = 5,         # maximum tree depth
+                               xval = 10             # number of cross-validation folds in rpart
 ) {
   
   # --- Basic setup ---
@@ -740,8 +741,8 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
   G <- length(unique(df[[id]]))                    # number of clusters
   idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
   
-  y <- df[[y]]                                     # response vector
-  Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
+  y <- df[[target]]                                     # response vector
+  Z <- as.matrix(cbind(1, df[random_effects]))                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
   
   # --- Initialization (Step 0) ---
@@ -750,12 +751,13 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
   y_t <- log(mu / (1 - mu)) + (y - mu) / (mu * (1 - mu))  # initial pseudo-response (PQL linearization)
   w <- mu * (1 - mu)                            # initial working weights
   sigma2 <- 1                                   # initial residual variance
-  D <- diag(2)                                  # initial random-effects covariance (identity)
+  D <- diag(q)                                  # initial random-effects covariance (identity)
   b <- matrix(0, G, q)                          # initialize cluster random effects
   gll <- c(0, 0)                                # GLL storage (2 slots for Aitken acceleration)
   eta_old <- rep(0, N)                          # previous eta for outer-loop convergence check
   converged_in <- c()                           # inner-loop convergence flags (per outer iteration)
   converged_out <- FALSE                        # outer-loop convergence flag
+  time_start <- proc.time()                  # start timer
   
   # --- Outer loop (PQL updates) ---
   repeat {
@@ -773,21 +775,14 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
       }
       y_star <- y_t - zb                        # adjusted response for tree fit
       
-      # (1.ii) M-step: fit random forest to (y_tilde*, X, W)
-      Xrf <- df[[setdiff(names(df), c(id, y))]]
-      rf <- ranger::ranger(
-        formula         = y_star ~ .,
-        data            = cbind(y_star = y_star, Xrf),
-        case.weights    = w,
-        num.trees       = ntrees,
-        min.node.size   = min_node_size,
-        max.depth       = max.depth,
-        respect.unordered.factors = TRUE,
-        importance      = "none",
-        write.forest    = TRUE,
-        seed            = seed
-      )
-      fhat <- as.numeric(predict(rf, data = Xrf)$predictions)
+      # (1.ii) M-step: fit regression tree for fixed effects f(X)
+      ctrl <- rpart.control(cp = cp, minsplit = minsplit, xval = xval,
+                            minbucket = minbucket, maxdepth = maxdepth)
+      Xdf <- df[setdiff(names(df), c(id, target))]
+      tree <- rpart(y_star ~ .,
+                    data = cbind(y_star = y_star, Xdf),
+                    weights = w, method = "anova", control = ctrl)
+      fhat <- as.numeric(predict(tree, newdata = Xdf))
       
       # (1.iii) Update random effects b_i
       Ainv <- Ajnv_fun(Z = Z, D = D, sigma2 = sigma2, G = G, idx = idx_by_cluster, w = w)  # build V_i per cluster
@@ -848,9 +843,14 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
     }
   }
   
+  # --- Stop timer and compute elapsed time ---
+  time_end <- proc.time()
+  elapsed <- as.numeric((time_end - time_start)["elapsed"])   # total runtime in seconds
+  
+  
   # --- Return fitted components ---
   list(
-    forest = rf$forest,           # fitted regression forest
+    tree = tree,                   # fitted rpart tree (fixed-effects function f(X))
     b = b,                         # estimated random effects (G x q)
     D = D,                         # estimated random-effects covariance
     sigma2 = sigma2,               # estimated residual variance
@@ -860,9 +860,12 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
     n_iter = n_iter,               # iterations performed (inner loop)
     train_ids = df$id,             # cluster identifiers in training set
     gll = gll,                     # GLL trace (for diagnostics)
-    tol = tol                      # convergence tolerance used
+    tol = tol,                     # convergence tolerance used
+    time = elapsed                 # total runtime (seconds)
   )
 }
+
+
 
 
 
@@ -871,7 +874,7 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
 
 fit_gmerf_small    <- function(df,               # df: data.frame with columns
                                id = "id",      # cluster identifier column name
-                               y = "y",        # response column name
+                               target = "y",        # response column name
                                random_effects = "x1",  # random effects design column names (intercept + slope on x1)
                                max_iter_inn = 1000,  # maximum number of EM iterations (inner loop)
                                max_iter_out = 1000,  # maximum number of PQL iterations (outer loop)
@@ -888,8 +891,8 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
   G <- length(unique(df[[id]]))                    # number of clusters
   idx_by_cluster <- split(seq_len(N), df[[id]])    # list: row indices grouped by cluster
   
-  y <- df[[y]]                                     # response vector
-  Z <- cbind(1, df[[random_effects]])                          # random-effects design: intercept + slope on x1
+  y <- df[[target]]                                     # response vector
+  Z <- as.matrix(cbind(1, df[random_effects]))                          # random-effects design: intercept + slope on x1
   q <- ncol(Z)                                  # number of random effects (q = 2)
   
   # --- Initialization (Step 0) ---
@@ -898,12 +901,13 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
   y_t <- log(mu / (1 - mu)) + (y - mu) / (mu * (1 - mu))  # initial pseudo-response (PQL linearization)
   w <- mu * (1 - mu)                            # initial working weights
   sigma2 <- 1                                   # initial residual variance
-  D <- diag(2)                                  # initial random-effects covariance (identity)
+  D <- diag(q)                                  # initial random-effects covariance (identity)
   b <- matrix(0, G, q)                          # initialize cluster random effects
   gll <- c(0, 0)                                # GLL storage (2 slots for Aitken acceleration)
   eta_old <- rep(0, N)                          # previous eta for outer-loop convergence check
   converged_in <- c()                           # inner-loop convergence flags (per outer iteration)
   converged_out <- FALSE                        # outer-loop convergence flag
+  time_start <- proc.time()                    # start timer
   
   # --- Outer loop (PQL updates) ---
   repeat {
@@ -922,7 +926,7 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
       y_star <- y_t - zb                        # adjusted response for tree fit
       
       # (1.ii) M-step: fit random forest to (y_tilde*, X, W)
-      Xrf <- df[[setdiff(names(df), c(id, y))]]
+      Xrf <- df[setdiff(names(df), c(id, target))]
       rf <- ranger::ranger(
         formula         = y_star ~ .,
         data            = cbind(y_star = y_star, Xrf),
@@ -1012,4 +1016,16 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
   )
 }
 
-
+# f1 score function for magiority class or minority class
+f1_fun <- function(table, magiority = TRUE) {
+  mag0 <- sum(table[1,]) > sum(table[2,])
+  if ((magiority + mag0) != 1) {
+    precision <- table[1,1] / (sum(table[1, ]))
+    recall    <- table[1,1] / (sum(table[, 1]))
+  } else {
+    precision <- table[2,2] / (sum(table[2, ]))
+    recall    <- table[2,2] / (sum(table[, 2]))
+  }
+  F1        <- 2 * precision * recall / (precision + recall)
+  F1
+}

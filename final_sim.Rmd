@@ -1443,7 +1443,8 @@ re_vars <- paste0("x", 1:n_re)              # random-effect features
 
 fixed_part  <- paste(paste0("x", 1:p), collapse = " + ")
 random_part <- paste0("(1 + ", paste(re_vars, collapse = " + "), " | id)")
-form <- as.formula(paste("y ~", fixed_part, "+", random_part))  
+form <- as.formula(paste("y ~", fixed_part, "+", random_part))
+form_logit <- as.formula(paste("y ~", fixed_part))
   
 # pick number of workers (leave one core free when possible)
 n_workers <- max(1L, min(K, detectCores() - 1L))
@@ -1456,7 +1457,7 @@ clusterSetRNGStream(cl, iseed = 42)
 clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
 clusterExport(
   cl,
-  varlist = c("df", "folds", "re_vars", "form","fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
+  varlist = c("df", "folds", "re_vars", "form","form_logit", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
                 "b_fun_small","D_fun_small","sigma_fun_small","gll_fun", 
               "fit_gmerf_small","predict_gmerf"),
   envir = environment()
@@ -1472,7 +1473,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
 
   # GMERT: fit and predict
   fit_gmert_k <- fit_gmert_small(df_train, random_effects = re_vars,
-                                 max_iter_out = 5, tol = 1e-4)
+                                 max_iter_out = 20, tol = 1e-4)
   yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
 
   # GLMM: fit and predict (same random-effects structure)
@@ -1487,11 +1488,11 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   
   #GEMERF: fit and predict
   fit_gmerf_k <- fit_gmerf_small(df_train, random_effects = re_vars,
-                                 max_iter_out = 5, tol = 1e-4)
+                                 max_iter_out = 20, tol = 1e-4)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
-  logit_fit_k <- glm(form, data = df_train, family = binomial())
+  logit_fit_k <- glm(form_logit, data = df_train, family = binomial())
   p_logit     <- as.numeric(predict(logit_fit_k, newdata = df_test, type = "response"))
   pred_logit  <- as.integer(p_logit >= 0.5)
   
@@ -1673,6 +1674,7 @@ cv_summary_par <- data.frame(
 )
 summary_list[[as.character(p)]] <- cv_summary_par
 results_list[[as.character(p)]] <- cv_results_par
+print(p)
 }
 
 
