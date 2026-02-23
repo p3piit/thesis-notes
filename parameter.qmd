@@ -1,0 +1,153 @@
+---
+title: "Settings"
+format: html
+---
+
+Libraries
+
+```{r}
+library(tidyverse)
+library(lme4)
+library(devtools)
+devtools::install_github("p3piit/mlml")
+```
+
+Set general parameters for the different models
+```{r}
+target <- "car"
+args_gmert <- list(
+    id = "id",
+    target = target,
+    random_effect = c(),
+    max_iter_inn = 50,
+    max_iter_out = 10,
+    tol = 1e-02,
+    cp = 0,
+    minsplit = 50,
+    minbucket = 20,
+    maxdepth = 5,
+    xval = 10,
+    sanity_check = TRUE
+)
+
+args_gmerf <- list(
+    id = "id",
+    target = target,
+    random_effect = c(),
+    max_iter_inn = 50,
+    max_iter_out = 10,
+    tol = 1e-02,
+    ntrees = 10,
+    mtry = NULL,
+    min_node_size = 5,
+    max.depth = NULL,
+    seed = 1234,
+    num.threads = NULL,
+    sanity_check = TRUE
+)
+
+ctrl <- rpart::rpart.control(
+    cp = 0,
+    minsplit = 50,
+    minbucket = 20,
+    maxdepth = 5,
+    xval = 10
+)
+
+args_rn <- list(
+    ntrees = 10,
+    mtry = NULL,
+    min_node_size = 5,
+    max.depth = NULL,
+    seed = 1234,
+    num.threads = NULL
+)
+
+random_effect <- "" 
+
+threshold_subset <- 5
+```
+
+Data processing
+
+```{r}
+
+
+data_model <- data %>%
+  mutate(id = user_id,
+         car = ifelse(label_track == "car", TRUE, FALSE)) %>%
+  select(-event_id,-start_time, -end_time, -label, -label_stop,
+  -duration_hours, -durations_secs, -start_day, -end_day,
+  -n_labeled_tracks, -user_id, -label_track)
+```
+
+
+Now run the the data with sub_id and split_by_cluster both true and false, the 4 cases
+
+
+```{r}
+
+analysis_script <- "analysis.R"             
+
+# where to store logs
+dir.create("logs", showWarnings = FALSE)
+
+# ---- 4 cases ----
+grid <- expand.grid(
+  sub_id = c(FALSE, TRUE),
+  split_by_cluster = c(FALSE, TRUE),
+  stringsAsFactors = FALSE
+)
+
+run_one <- function(sub_id, split_by_cluster) {
+  tag <- sprintf("sub_%s__split_%s",
+                 tolower(as.character(sub_id)),
+                 tolower(as.character(split_by_cluster)))
+  log_file <- file.path("logs", paste0(tag, ".log"))
+
+  # Build environment for this run
+  env <- c(
+    TARGET = target,
+    THRESHOLD_SUBSET = as.character(threshold_subset),
+    SUB_ID = as.character(sub_id),
+    SPLIT_BY_CLUSTER = as.character(split_by_cluster),
+    RANDOM_EFFECT = random_effect
+  )
+
+  # Run analysis in a separate R process; capture output+errors to log
+  status <- system2(
+    command = Sys.which("Rscript"),
+    args = c("--vanilla", analysis_script),
+    env = env,
+    stdout = log_file,
+    stderr = log_file
+  )
+
+  data.frame(
+    sub_id = sub_id,
+    split_by_cluster = split_by_cluster,
+    status = if (status == 0) "OK" else paste0("FAILED(", status, ")"),
+    log = log_file,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Run all cases; NEVER STOP
+results <- do.call(
+  rbind,
+  lapply(seq_len(nrow(grid)), function(i) {
+    tryCatch(
+      run_one(grid$sub_id[i], grid$split_by_cluster[i]),
+      error = function(e) data.frame(
+        sub_id = grid$sub_id[i],
+        split_by_cluster = grid$split_by_cluster[i],
+        status = "LAUNCHER_ERROR",
+        log = NA_character_,
+        stringsAsFactors = FALSE
+      )
+    )
+  })
+)
+
+results
+```
