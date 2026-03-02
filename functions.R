@@ -396,8 +396,7 @@ sim_data_gmert <- function(G = 50,          # number of clusters
     x3 = x3
   )
 }
-
-##############################################################
+#######################################
 
 # ---------------------------------------------------------------
 # Train/test split per cluster using the sim_data_gmert() output
@@ -883,7 +882,8 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
                                mtry   = NULL,       # RF: features tried at each split (default = floor(p/3) if NULL)
                                min_node_size = 5,   # RF: terminal node size
                                max.depth = NULL,    # RF: optional max depth (NULL = unlimited)
-                               seed = 1234          # random seed for reproducibility 
+                               seed = 1234,         # random seed for reproducibility 
+                               num.threads = NULL   # RF: number of threads (NULL = all available)
 ) {
   
   # --- Basic setup ---
@@ -937,7 +937,8 @@ fit_gmerf_small    <- function(df,               # df: data.frame with columns
         respect.unordered.factors = TRUE,
         importance      = "none",
         write.forest    = TRUE,
-        seed            = seed
+        seed            = seed,
+        num.threads     = num.threads
       )
       fhat <- as.numeric(predict(rf, data = Xrf)$predictions)
       

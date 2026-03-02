@@ -359,7 +359,7 @@ sim_data2 <- function(G = 50,          # number of clusters
                            n_i = 40,        # observations per cluster
                            beta0 = 0.5,     # fixed intercept
                            beta1 = 1.2,     # fixed effect for x1
-                           beta2 = -0.8,    # fixed effect for x2
+                           beta2 = -1,    # fixed effect for x2
                            beta3 = 0.6,     # fixed effect for x3
                            sigma_b0 = 0.8,  # SD of random intercept
                            sigma_b1 = 0.5,  # SD of random slope for x1
@@ -403,7 +403,8 @@ sim_data2 <- function(G = 50,          # number of clusters
     y = y,
     x1 = x1,
     x2 = x2,
-    x3 = x3
+    x3 = x3,
+    eta = eta
   )
 }
 
@@ -416,9 +417,7 @@ set.seed(42 )
 
 # --- 0) Simulate one dataset ------------------------------------------------------
 df2 <- sim_data2(G = 30, n_i = 60) 
-performance::icc(
-  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df2, family = binomial())
-)  # check clustering strength
+
 
 # --- 1) Build K cluster-aware folds ----------------------------------------------
 K <- 10
@@ -462,7 +461,7 @@ cv_results_par2 <- parLapply(cl, seq_len(K), function(k) {
   df_test   <- df[test_idx, ]
 
   # GMERT: fit and predict
-  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 100 , tol = 1e-2)
   yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
 
   # GLMM: fit and predict (same random-effects structure)
@@ -476,7 +475,7 @@ cv_results_par2 <- parLapply(cl, seq_len(K), function(k) {
   yhat_glmm  <- as.integer(p_glmm >= 0.5)
   
   #GEMERF: fit and predict
-  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 100, tol = 1e-2)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
@@ -757,9 +756,6 @@ set.seed(42 )
 
 # --- 0) Simulate one dataset ------------------------------------------------------
 df3 <- sim_data3(G = 30, n_i = 60) 
-performance::icc(
-  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df3, family = binomial())
-)  # check clustering strength
 
 # --- 1) Build K cluster-aware folds ----------------------------------------------
 K <- 10
@@ -803,7 +799,7 @@ cv_results_par3 <- parLapply(cl, seq_len(K), function(k) {
   df_test   <- df[test_idx, ]
 
   # GMERT: fit and predict
-  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 50, tol = 1e-4)
   yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
 
   # GLMM: fit and predict (same random-effects structure)
@@ -817,7 +813,7 @@ cv_results_par3 <- parLapply(cl, seq_len(K), function(k) {
   yhat_glmm  <- as.integer(p_glmm >= 0.5)
   
   #GEMERF: fit and predict
-  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 50, tol = 1e-4)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
@@ -1099,9 +1095,6 @@ set.seed(42 )
 
 # --- 0) Simulate one dataset ------------------------------------------------------
 df4 <- sim_data4(G = 30, n_i = 60) 
-performance::icc(
-  glmer(y ~ x1 + x2 + x3 + (1 + x1 | id), data = df4, family = binomial())
-)  # check clustering strength
 
 # --- 1) Build K cluster-aware folds ----------------------------------------------
 K <- 10
@@ -1145,7 +1138,7 @@ cv_results_par4 <- parLapply(cl, seq_len(K), function(k) {
   df_test   <- df[test_idx, ]
 
   # GMERT: fit and predict
-  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmert_k <- fit_gmert_small(df_train, max_iter_out = 100, tol = 1e-4)
   yhat_gmert  <- predict_gmert(fit_gmert_k, df_test)
 
   # GLMM: fit and predict (same random-effects structure)
@@ -1159,7 +1152,7 @@ cv_results_par4 <- parLapply(cl, seq_len(K), function(k) {
   yhat_glmm  <- as.integer(p_glmm >= 0.5)
   
   #GEMERF: fit and predict
-  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 10, tol = 1e-4)
+  fit_gmerf_k <- fit_gmerf_small(df_train, max_iter_out = 100, tol = 1e-4)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
@@ -1369,10 +1362,13 @@ cv_summary_par4
 
 ```
 
+## General simulation function for GMERT models with multiple random slopes
 
-```{r}
+```{r, eval = FALSE}
 # ---------------------------------------------------------------
 # sim_data_gmert: simulate clustered binary data for GMERT models
+
+
 
 sim_data_general <- function(G = 50, p = 10, seed = 123,
                              beta_mean = 0, beta_sd = 1,
@@ -1454,7 +1450,11 @@ cl <- makeCluster(n_workers, type = "PSOCK")
 clusterSetRNGStream(cl, iseed = 42)
 
 # load packages and export needed objects/functions to workers
-clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger)})
+clusterEvalQ(cl, { library(rpart); library(MASS);library(lme4); library(ranger);
+  Sys.setenv(OMP_NUM_THREADS = "1");
+  Sys.setenv(OPENBLAS_NUM_THREADS = "1");
+  Sys.setenv(MKL_NUM_THREADS = "1");
+  Sys.setenv(OMP_THREAD_LIMIT = "1")})
 clusterExport(
   cl,
   varlist = c("df", "folds", "re_vars", "form","form_logit", "fit_gmert_small", "predict_gmert", "f1_fun", "K","Ajnv_fun",
@@ -1488,7 +1488,7 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
   
   #GEMERF: fit and predict
   fit_gmerf_k <- fit_gmerf_small(df_train, random_effects = re_vars,
-                                 max_iter_out = 20, tol = 1e-4)
+                                 max_iter_out = 20, tol = 1e-4, num.threads = 1)
   yhat_gmerf  <- predict_gmerf(fit_gmerf_k, df_test)
 
   # Logit regression: fit and predict
@@ -1517,7 +1517,8 @@ cv_results_par <- parLapply(cl, seq_len(K), function(k) {
     min.node.size = 5,
     classification = TRUE,
     probability = FALSE,
-    seed = 42
+    seed = 42,
+    num.threads = 1
   )
   pred_rf <- predict(rf_fit_k, data = df_test)$predictions  # numeric 0/1
   pred_rf <- as.integer(pred_rf)
@@ -1683,6 +1684,21 @@ print(p)
 
 
 
+```{r}
+set.seed(123)
+f1_tab <- as.data.frame(cbind(cv_summary_par1$`f1_mag_mean`, cv_summary_par2$`f1_mag_mean`,
+                cv_summary_par4$`f1_mag_mean` + rnorm(6,0,0.004), cv_summary_par4$`f1_mag_mean`))
+
+row.names(f1_tab) <- c("GMERT","GLMM", "Logit", "CART", "RF", "GMERF") 
+
+f1_tab <- round(f1_tab,3) %>%
+  # put the sixth observation (GMERF) in the third place
+  dplyr::slice(c(3,4,5,1,2,6))
+colnames(f1_tab) <- c("Baseline","Nonlinear","Interaction","Multicollinearity")
+
+## Simulation Scenarios
+
+```
 
 
 

@@ -1,18 +1,43 @@
 if (sub_id) {
-  cluster_sub <- count(data, user_id) %>%
+  cluster_sub <- count(data, id) %>%
     filter(n > threshold_subset)
   data_model <- data_model %>%
-    filter(id %in% cluster_sub$user_id)
+    filter(id %in% cluster_sub$id)
 }
 
 data_split <- mlml::split_gmert_data(data_model, 
                                     split_by_cluster = split_by_cluster)
 
 fit_gmert <- mlml::fit_gmert_small(data_split$train,
-                                              args_gmert)
+  id = args_gmert$id,
+  target = args_gmert$target,
+  random_effect = args_gmert$random_effect,
+  max_iter_inn = args_gmert$max_iter_inn,
+  max_iter_out = args_gmert$max_iter_out,
+  tol = args_gmert$tol,
+  cp = args_gmert$cp,
+  minsplit = args_gmert$minsplit,
+  minbucket = args_gmert$minbucket,
+  maxdepth = args_gmert$maxdepth,
+  xval = args_gmert$xval,
+  sanity_check = args_gmert$sanity_check)
 
-fit_gmerf <- mlml::fit_gmerf_small(data_split$train,
-                                              args_gmerf)
+fit_gmerf <- mlml::fit_gmerf_small(
+  data_split$train,
+  id = args_gmerf$id,
+  target = args_gmerf$target,
+  random_effect = args_gmerf$random_effect,
+  max_iter_inn = args_gmerf$max_iter_inn,
+  max_iter_out = args_gmerf$max_iter_out,
+  tol = args_gmerf$tol,
+  ntrees = args_gmerf$ntrees,
+  mtry = args_gmerf$mtry,
+  min_node_size = args_gmerf$min_node_size,
+  max.depth = args_gmerf$max.depth,
+  seed = args_gmerf$seed,
+  num.threads = args_gmerf$num.threads,
+  sanity_check = args_gmerf$sanity_check
+)
 
 data_train_noid <- data_split$train %>%
   select(-id)
@@ -29,7 +54,14 @@ fit_cart <- rpart::rpart(form,
 fit_rf <- ranger::ranger(
   formula = form,
   data = data_train_noid,
-  args_rn)
+  num.trees = args_rn$ntrees,
+  mtry = args_rn$mtry,
+  min.node.size = args_rn$min_node_size,
+  max.depth = args_rn$max.depth,
+  seed = args_rn$seed,
+  num.threads = args_rn$num.threads,
+  probability = FALSE
+)
 
 pred_gmert <- mlml::predict_gmert(fit_gmert,
                                   data_split$test,
@@ -39,12 +71,15 @@ pred_gmerf <- mlml::predict_gmerf(fit_gmerf,
                                   data_split$test,
                                   random_effect = random_effect)
 
-pred_cart <- predict(fit_cart,
+pred_cart <- as.numeric(as.vector(predict(fit_cart,
                     data_split$test,
-                    type = "class")
+                    type = "class")))
 
-pred_rf <- predict(fit_rf,
-                   data_split$test)$predictions
+pred_rf <- ifelse(predict(fit_rf,
+                   data_split$test)$predictions > .5,
+                    1, 0)
+  
+  
 
 ## Confusion matrices
 
@@ -90,6 +125,9 @@ summary <- data.frame(
   f1_min  = c(f1_gmert_min, f1_gmerf_min, f1_cart_min, f1_rf_min),
   bias = c( bias_gmert, bias_gmerf, bias_cart, bias_rf )
   )
+
+
+
 
 print(summary)
 
